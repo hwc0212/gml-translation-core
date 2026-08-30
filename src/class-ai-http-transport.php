@@ -8,7 +8,6 @@
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
-
 class GML_AI_HTTP_Transport {
 
     const MAX_REQUEST_BYTES  = 1048576;
@@ -203,4 +202,3 @@ class GML_AI_HTTP_Transport {
         sleep( $seconds );
     }
 }
-

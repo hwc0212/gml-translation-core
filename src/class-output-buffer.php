@@ -62,8 +62,7 @@ class GML_Translation_Output_Buffer {
 
     // ── Buffer callback ───────────────────────────────────────────────────────
 
-    
-        public function process_buffer( $html ) {
+    public function process_buffer( $html ) {
             if ( ! $this->is_html( $html ) ) {
                 return $html;
             }

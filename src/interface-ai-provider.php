@@ -11,7 +11,6 @@
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
-
 interface GML_AI_Provider_Interface {
     public function supports( $capability );
     public function validate_credentials();
@@ -20,4 +19,3 @@ interface GML_AI_Provider_Interface {
     public function get_model();
     public function get_last_error();
 }
-
