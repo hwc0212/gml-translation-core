@@ -17,10 +17,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Translation_Output_Buffer {
 
-    private $enabled     = false;
-    private $source_lang = '';
-    private $target_lang = '';
-    private $buffer_level = 0;
+    protected $enabled     = false;
+    protected $source_lang = '';
+    protected $target_lang = '';
+    protected $buffer_level = 0;
 
     public function __construct() {
         add_action( 'template_redirect', [ $this, 'start_buffer' ], 1 );
@@ -194,7 +194,7 @@ class GML_Translation_Output_Buffer {
          * Require all SEO strings and at least 95% of page strings to have a
          * translation before the language page can be indexed.
          */
-        private function translation_is_index_ready( array $translated ) {
+        protected function translation_is_index_ready( array $translated ) {
             $nodes        = $translated['nodes'] ?? [];
             $replacements = $translated['replacements'] ?? [];
             $unique       = [];
@@ -235,7 +235,7 @@ class GML_Translation_Output_Buffer {
          * Keep incomplete language pages accessible for review while preventing
          * search engines from indexing an English or partially translated copy.
          */
-        private function protect_incomplete_translation( $html ) {
+        protected function protect_incomplete_translation( $html ) {
             $html = preg_replace(
                 '#\s*<link\b(?=[^>]*\brel=["\']alternate["\'])(?=[^>]*\bhreflang=["\'][^"\']+["\'])[^>]*>#i',
                 '',
@@ -265,7 +265,7 @@ class GML_Translation_Output_Buffer {
          * Shared translated HTML is only safe for anonymous, cacheable GET
          * requests that carry no commerce/session identity or attribution data.
          */
-        private function can_use_page_cache() {
+        protected function can_use_page_cache() {
             if ( is_user_logged_in() || strtoupper( (string) ( $_SERVER['REQUEST_METHOD'] ?? 'GET' ) ) !== 'GET' ) {
                 return false;
             }
@@ -300,7 +300,7 @@ class GML_Translation_Output_Buffer {
          * Do not persist responses containing request-bound security tokens or
          * headers that explicitly prohibit shared caching.
          */
-        private function html_is_cache_safe( $html ) {
+        protected function html_is_cache_safe( $html ) {
             if ( function_exists( 'headers_list' ) ) {
                 foreach ( headers_list() as $header ) {
                     if ( preg_match( '/^set-cookie\s*:/i', $header ) || preg_match( '/^cache-control\s*:.*(?:private|no-store|no-cache)/i', $header ) ) {
@@ -318,7 +318,7 @@ class GML_Translation_Output_Buffer {
         /**
          * Parse php.ini memory_limit into bytes.
          */
-        private function get_memory_limit_bytes() {
+        protected function get_memory_limit_bytes() {
             $limit = ini_get( 'memory_limit' );
             if ( $limit === '-1' || $limit === '' || $limit === false ) {
                 return 0; // unlimited or unknown
@@ -345,7 +345,7 @@ class GML_Translation_Output_Buffer {
      *
      * Returns [ $html_with_placeholders, [ placeholder => original_html ] ]
      */
-    private function extract_no_translate_blocks( $html ) {
+    protected function extract_no_translate_blocks( $html ) {
         $placeholders = [];
         $counter      = 0;
         $result       = '';
@@ -514,7 +514,7 @@ class GML_Translation_Output_Buffer {
      *   - Skip links inside .gml-language-switcher (already correct)
      *   - Skip non-HTTP schemes (mailto:, tel:, javascript:, #)
      */
-    private function rewrite_internal_links( $html ) {
+    protected function rewrite_internal_links( $html ) {
         $home_url    = home_url();
         $home_origin = rtrim( $home_url, '/' );
         $prefix      = '/' . $this->target_lang . '/';
@@ -550,7 +550,7 @@ class GML_Translation_Output_Buffer {
      * Rewrite one URL value; return the original when it is not a safe public
      * link inside this WordPress installation.
      */
-    private function rewrite_single_url( $url, $home_origin, $prefix, $lang_pattern ) {
+    protected function rewrite_single_url( $url, $home_origin, $prefix, $lang_pattern ) {
         // Skip empty, anchors, non-http schemes
         if ( $url === '' || $url[0] === '#' ) {
             return $url;
@@ -628,7 +628,7 @@ class GML_Translation_Output_Buffer {
     /**
      * Scan real attributes outside quoted builder data and replace one URL.
      */
-    private function rewrite_tag_url_attribute( $tag, $tag_name, $attribute_name, $home_origin, $prefix, $lang_pattern ) {
+    protected function rewrite_tag_url_attribute( $tag, $tag_name, $attribute_name, $home_origin, $prefix, $lang_pattern ) {
         $length = strlen( $tag );
         $cursor = 1 + strlen( $tag_name );
 
@@ -693,7 +693,7 @@ class GML_Translation_Output_Buffer {
      * Map complete HTML tags without treating a quoted > as a tag boundary.
      * Raw script/style/SVG blocks and comments remain byte-for-byte unchanged.
      */
-    private function map_html_tags( $html, callable $callback ) {
+    protected function map_html_tags( $html, callable $callback ) {
         $html     = (string) $html;
         $length   = strlen( $html );
         $offset   = 0;
@@ -743,7 +743,7 @@ class GML_Translation_Output_Buffer {
         return $result;
     }
 
-    private function find_tag_end( $html, $start ) {
+    protected function find_tag_end( $html, $start ) {
         $length = strlen( $html );
         $quote  = '';
         for ( $cursor = $start + 1; $cursor < $length; $cursor++ ) {
@@ -778,7 +778,7 @@ class GML_Translation_Output_Buffer {
      * can highlight the active language), but it must NOT cause translation
      * on non-prefixed URLs.
      */
-    private function detect_target_language() {
+    protected function detect_target_language() {
         return $this->get_url_language() ?? $this->source_lang;
     }
 
@@ -786,7 +786,7 @@ class GML_Translation_Output_Buffer {
      * Extract language code from REQUEST_URI, e.g. /ru/about/ → 'ru'.
      * Returns null if the URL has no recognised language prefix.
      */
-    private function get_url_language() {
+    protected function get_url_language() {
         $uri  = $_SERVER['REQUEST_URI'] ?? '';
         $path = strtok( $uri, '?' );
         if ( class_exists( 'GML_Language_Utils' ) ) {
@@ -798,7 +798,7 @@ class GML_Translation_Output_Buffer {
         return null;
     }
 
-    private function is_enabled_language( $lang ) {
+    protected function is_enabled_language( $lang ) {
         $configured = get_option( 'gml_languages', [] );
         foreach ( $configured as $l ) {
             if ( ( $l['enabled'] ?? true ) && $l['code'] === $lang ) {
@@ -810,7 +810,7 @@ class GML_Translation_Output_Buffer {
 
     // ── Guards ────────────────────────────────────────────────────────────────
 
-    private function should_skip() {
+    protected function should_skip() {
         // Admin pages
         if ( is_admin() ) {
             return true;
@@ -867,7 +867,7 @@ class GML_Translation_Output_Buffer {
      *
      * Covers: Elementor, Beaver Builder, Divi, Bricks, WPBakery, Oxygen, Breakdance.
      */
-    private function is_page_builder_editor() {
+    protected function is_page_builder_editor() {
         // Elementor: sets a query var when in editor preview
         if ( isset( $_GET['elementor-preview'] ) || isset( $_GET['elementor_library'] ) ) {
             return true;
@@ -907,7 +907,7 @@ class GML_Translation_Output_Buffer {
         return false;
     }
 
-    private function is_html_response() {
+    protected function is_html_response() {
         foreach ( headers_list() as $header ) {
             if ( stripos( $header, 'Content-Type:' ) === 0 ) {
                 return stripos( $header, 'text/html' ) !== false;
@@ -916,7 +916,7 @@ class GML_Translation_Output_Buffer {
         return true; // assume HTML if no Content-Type header yet
     }
 
-    private function is_html( $content ) {
+    protected function is_html( $content ) {
         return stripos( $content, '<html' ) !== false
             || stripos( $content, '<!DOCTYPE' ) !== false;
     }
