@@ -177,12 +177,13 @@ class GML_Translation_Provider implements GML_Translation_Provider_Interface {
         if ( array_key_exists( $lang, $this->readiness ) ) {
             return $this->readiness[ $lang ];
         }
-        if ( class_exists( 'GML_Translation_Readiness' ) ) {
-            $ready = GML_Translation_Readiness::language_is_index_ready( $lang );
+        if ( class_exists( 'GML_Queue_Processor' ) && method_exists( 'GML_Queue_Processor', 'language_is_index_ready' ) ) {
+            // Product adapters may provide a test double or a more specific
+            // storage adapter. Production adapters delegate this to Core.
+            $ready = GML_Queue_Processor::language_is_index_ready( $lang );
         } else {
-            $ready = class_exists( 'GML_Queue_Processor' )
-                && method_exists( 'GML_Queue_Processor', 'language_is_index_ready' )
-                && GML_Queue_Processor::language_is_index_ready( $lang );
+            $ready = class_exists( 'GML_Translation_Readiness' )
+                && GML_Translation_Readiness::language_is_index_ready( $lang );
         }
         $this->readiness[ $lang ] = (bool) $ready;
         return $this->readiness[ $lang ];
