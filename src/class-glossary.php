@@ -18,6 +18,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class GML_Glossary {
+	const MAX_RULES        = 500;
+	const MAX_PROMPT_RULES = 100;
+	const MAX_PROMPT_BYTES = 8192;
+	const MAX_TERM_LENGTH  = 200;
 
     /**
      * Get all glossary rules.
@@ -25,7 +29,8 @@ class GML_Glossary {
      * @return array [ [ 'source' => 'X', 'target' => 'Y', 'lang' => 'es'|'all', 'enabled' => true ], ... ]
      */
     public static function get_rules() {
-        return get_option( 'gml_glossary_rules', [] );
+        $rules = get_option( 'gml_glossary_rules', [] );
+        return is_array( $rules ) ? array_slice( $rules, 0, self::MAX_RULES ) : [];
     }
 
     /**
@@ -33,16 +38,24 @@ class GML_Glossary {
      */
     public static function save_rules( $rules ) {
         $sanitized = [];
-        foreach ( $rules as $rule ) {
-            if ( empty( $rule['source'] ) ) continue;
+        foreach ( array_slice( is_array( $rules ) ? $rules : [], 0, self::MAX_RULES ) as $rule ) {
+            if ( ! is_array( $rule ) || empty( $rule['source'] ) ) continue;
+            $source = self::truncate( sanitize_text_field( $rule['source'] ), self::MAX_TERM_LENGTH );
+            $target = self::truncate( sanitize_text_field( $rule['target'] ?? '' ), self::MAX_TERM_LENGTH );
+            $lang   = sanitize_key( $rule['lang'] ?? 'all' );
+            if ( $source === '' ) continue;
+            if ( $lang !== 'all' && class_exists( 'GML_Language_Utils' ) ) {
+                $lang = GML_Language_Utils::normalize_code( $lang );
+            }
+            if ( $lang === '' ) $lang = 'all';
             $sanitized[] = [
-                'source'  => sanitize_text_field( $rule['source'] ),
-                'target'  => sanitize_text_field( $rule['target'] ?? '' ),
-                'lang'    => sanitize_text_field( $rule['lang'] ?? 'all' ),
+                'source'  => $source,
+                'target'  => $target,
+                'lang'    => $lang,
                 'enabled' => ! empty( $rule['enabled'] ),
             ];
         }
-        update_option( 'gml_glossary_rules', $sanitized );
+        return update_option( 'gml_glossary_rules', $sanitized, false );
     }
 
     /**
@@ -57,17 +70,32 @@ class GML_Glossary {
             return '';
         }
 
+        $target_lang  = class_exists( 'GML_Language_Utils' )
+            ? GML_Language_Utils::normalize_code( $target_lang )
+            : sanitize_key( $target_lang );
         $translations = [];
+        $bytes        = 0;
         foreach ( $rules as $rule ) {
+            if ( count( $translations ) >= self::MAX_PROMPT_RULES ) break;
             if ( empty( $rule['enabled'] ) ) continue;
             if ( empty( $rule['source'] ) ) continue;
 
             // Rule applies to this language or all languages
-            $applies = ( $rule['lang'] === 'all' || $rule['lang'] === $target_lang );
+            $rule_lang = sanitize_key( $rule['lang'] ?? 'all' );
+            if ( $rule_lang !== 'all' && class_exists( 'GML_Language_Utils' ) ) {
+                $rule_lang = GML_Language_Utils::normalize_code( $rule_lang );
+            }
+            $applies = ( $rule_lang === 'all' || $rule_lang === $target_lang );
             if ( ! $applies ) continue;
 
             if ( ! empty( $rule['target'] ) ) {
-                $translations[] = '"' . $rule['source'] . '" → "' . $rule['target'] . '"';
+                $encoded = wp_json_encode(
+                    [ (string) $rule['source'] => (string) $rule['target'] ],
+                    JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+                );
+                if ( ! is_string( $encoded ) || $bytes + strlen( $encoded ) + 3 > self::MAX_PROMPT_BYTES ) break;
+                $translations[] = '- ' . $encoded;
+                $bytes += strlen( $encoded ) + 3;
             }
             // If target is empty, it's a "never translate" rule — already handled
             // by protected_terms, but we include it for completeness
@@ -77,6 +105,11 @@ class GML_Glossary {
             return '';
         }
 
-        return 'Glossary (MUST follow these exact translations): ' . implode( ', ', $translations ) . '. ';
+        return "Glossary (MUST follow these exact translations):\n" . implode( "\n", $translations ) . "\n";
     }
+
+	private static function truncate( $value, $length ) {
+		$value = trim( (string) $value );
+		return function_exists( 'mb_substr' ) ? mb_substr( $value, 0, $length ) : substr( $value, 0, $length );
+	}
 }

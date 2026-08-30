@@ -12,8 +12,9 @@ a third runtime plugin.
 
 Core owns translation state, storage schema, translation memory, safe AI
 transport, translation prompts, bounded queue processing, manual editor logic,
-translated HTML caching, parsing, glossary and exclusion logic, language/URL
-utilities, and read-only translated URL relationships.
+bounded content crawling, translated HTML caching, parsing, glossary and
+exclusion logic, language/URL utilities, and read-only translated URL
+relationships.
 
 Core must not register product menus, decide which plugin owns SEO output, read
 product-specific settings pages, or emit competing canonical/hreflang/sitemap

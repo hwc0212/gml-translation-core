@@ -1,0 +1,387 @@
+<?php
+/**
+ * Shared bounded crawler for proactively discovering translatable content.
+ *
+ * Product adapters may add metadata keys through the documented filters, but
+ * request validation, scheduling, locking, and queue safety live here.
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+class GML_Translation_Content_Crawler {
+	const CRON_HOOK   = 'gml_crawl_content';
+	const BATCH_SIZE  = 5;
+	const LOCK_OPTION = 'gml_translation_crawl_lock';
+
+	public function __construct() {
+		add_action( static::CRON_HOOK, [ $this, 'crawl_batch' ] );
+		add_filter( 'cron_schedules', [ $this, 'add_schedule' ] );
+		add_action( 'wp_loaded', [ $this, 'maybe_resume_crawl' ] );
+	}
+
+	public static function request_token() {
+		return hash_hmac( 'sha256', home_url( '/' ), wp_salt( 'nonce' ) );
+	}
+
+	public static function is_internal_request() {
+		$provided = isset( $_SERVER['HTTP_X_GML_CRAWL'] )
+			? (string) wp_unslash( $_SERVER['HTTP_X_GML_CRAWL'] )
+			: '';
+		return $provided !== '' && hash_equals( static::request_token(), $provided );
+	}
+
+	public function add_schedule( $schedules ) {
+		if ( ! isset( $schedules['gml_every_two_minutes'] ) ) {
+			$schedules['gml_every_two_minutes'] = [
+				'interval' => 120,
+				'display'  => apply_filters( 'gml_translation_crawl_schedule_label', 'GML Translation: Every 2 Minutes' ),
+			];
+		}
+		return $schedules;
+	}
+
+	public function maybe_resume_crawl() {
+		if ( ! get_option( 'gml_crawl_running', false ) ) {
+			return;
+		}
+		if ( static::safety_paused() ) {
+			static::unschedule_crawl();
+			return;
+		}
+		if ( ! static::ai_translation_available() ) {
+			static::stop_crawl();
+			return;
+		}
+		if ( ! wp_next_scheduled( static::CRON_HOOK ) ) {
+			wp_schedule_event( time(), 'gml_every_two_minutes', static::CRON_HOOK );
+		}
+	}
+
+	public static function start_crawl() {
+		if ( ! static::ai_translation_available() || static::safety_paused() ) {
+			return false;
+		}
+
+		delete_option( 'gml_crawl_offset' );
+		update_option( 'gml_crawl_total', static::count_crawlable_content(), false );
+		update_option( 'gml_crawl_running', true, false );
+
+		if ( ! wp_next_scheduled( static::CRON_HOOK ) ) {
+			wp_schedule_event( time(), 'gml_every_two_minutes', static::CRON_HOOK );
+		}
+		wp_schedule_single_event( time(), static::CRON_HOOK );
+		return true;
+	}
+
+	public static function stop_crawl() {
+		update_option( 'gml_crawl_running', false, false );
+		delete_option( 'gml_crawl_total' );
+		static::unschedule_crawl();
+	}
+
+	public static function get_status() {
+		$running = (bool) get_option( 'gml_crawl_running', false );
+		$offset  = max( 0, (int) get_option( 'gml_crawl_offset', 0 ) );
+		$total   = max( 0, (int) get_option( 'gml_crawl_total', 0 ) );
+		if ( $running && $total === 0 ) {
+			$total = static::count_crawlable_content();
+			update_option( 'gml_crawl_total', $total, false );
+		}
+		return [
+			'running'   => $running,
+			'processed' => min( $offset, $total ),
+			'total'     => $total,
+			'percent'   => $total > 0 ? min( 100, round( $offset / $total * 100 ) ) : 0,
+		];
+	}
+
+	public static function count_crawlable_content() {
+		$post_types = get_post_types( [ 'public' => true ], 'names' );
+		unset( $post_types['attachment'] );
+		$count = 0;
+		foreach ( $post_types as $post_type ) {
+			$counts = wp_count_posts( $post_type );
+			$count += isset( $counts->publish ) ? (int) $counts->publish : 0;
+		}
+		return $count;
+	}
+
+	public function crawl_batch() {
+		if ( ! get_option( 'gml_crawl_running', false ) ) {
+			return;
+		}
+		if ( static::safety_paused() ) {
+			static::unschedule_crawl();
+			return;
+		}
+		if ( ! static::ai_translation_available() ) {
+			static::stop_crawl();
+			return;
+		}
+		if ( ! static::acquire_lock() ) {
+			return;
+		}
+
+		try {
+			$this->process_crawl_batch();
+		} catch ( \Throwable $e ) {
+			static::log_event( 'batch_failed' );
+		} finally {
+			static::release_lock();
+		}
+	}
+
+	protected function process_crawl_batch() {
+		$languages   = (array) get_option( 'gml_languages', [] );
+		$source_lang = static::normalize_language( get_option( 'gml_source_lang', 'en' ) );
+		if ( empty( $languages ) || $source_lang === '' ) {
+			static::stop_crawl();
+			return;
+		}
+
+		$offset     = max( 0, (int) get_option( 'gml_crawl_offset', 0 ) );
+		$post_types = get_post_types( [ 'public' => true ], 'names' );
+		unset( $post_types['attachment'] );
+		$posts = get_posts( [
+			'post_type'      => array_values( $post_types ),
+			'post_status'    => 'publish',
+			'posts_per_page' => static::BATCH_SIZE,
+			'offset'         => $offset,
+			'orderby'        => 'ID',
+			'order'          => 'ASC',
+			'no_found_rows'  => true,
+		] );
+
+		if ( empty( $posts ) ) {
+			static::stop_crawl();
+			return;
+		}
+
+		$parser     = new GML_HTML_Parser();
+		$translator = new GML_Translator();
+		foreach ( $posts as $post ) {
+			try {
+				$html = $this->fetch_rendered_html( $post );
+				if ( empty( $html ) ) {
+					$html = $this->build_post_html( $post );
+				}
+				if ( empty( $html ) ) {
+					continue;
+				}
+
+				$parsed = $parser->parse( $html );
+				foreach ( $languages as $language ) {
+					$target = static::normalize_language( $language['code'] ?? '' );
+					if (
+						$target === '' ||
+						$target === $source_lang ||
+						empty( $language['enabled'] ) && array_key_exists( 'enabled', $language ) ||
+						! empty( $language['paused'] )
+					) {
+						continue;
+					}
+					$translator->translate( $parsed, $target );
+				}
+			} catch ( \Throwable $e ) {
+				static::log_event( 'post_failed', isset( $post->ID ) ? (int) $post->ID : 0 );
+			}
+		}
+
+		update_option( 'gml_crawl_offset', $offset + count( $posts ), false );
+		if ( class_exists( 'GML_Queue_Processor' ) && ! static::safety_paused() ) {
+			try {
+				( new GML_Queue_Processor() )->process_batch();
+			} catch ( \Throwable $e ) {
+				static::log_event( 'queue_failed' );
+			}
+		}
+	}
+
+	protected function fetch_rendered_html( $post ) {
+		$url = get_permalink( $post );
+		if ( ! $url || ! static::is_exact_site_url( $url ) ) {
+			return null;
+		}
+
+		$url = add_query_arg( 'gml_crawl', '1', $url );
+		$response = wp_safe_remote_get( $url, [
+			'timeout'             => 15,
+			'redirection'         => 0,
+			'sslverify'           => true,
+			'reject_unsafe_urls'  => true,
+			'limit_response_size' => 524288,
+			'user-agent'          => 'GML-Content-Crawler/1.0',
+			'cookies'             => [],
+			'headers'             => [
+				'Accept'      => 'text/html',
+				'X-GML-Crawl' => static::request_token(),
+			],
+		] );
+
+		if ( is_wp_error( $response ) ) {
+			static::log_event( 'fetch_failed', isset( $post->ID ) ? (int) $post->ID : 0 );
+			return null;
+		}
+		if ( (int) wp_remote_retrieve_response_code( $response ) !== 200 ) {
+			return null;
+		}
+
+		$content_type = strtolower( (string) wp_remote_retrieve_header( $response, 'content-type' ) );
+		if ( $content_type !== '' && strpos( $content_type, 'text/html' ) === false && strpos( $content_type, 'application/xhtml+xml' ) === false ) {
+			return null;
+		}
+		$body = (string) wp_remote_retrieve_body( $response );
+		if ( strlen( $body ) < 100 || strlen( $body ) > 524288 ) {
+			return null;
+		}
+		if ( stripos( $body, '<html' ) === false && stripos( $body, '<!doctype' ) === false ) {
+			return null;
+		}
+		return $body;
+	}
+
+	protected function build_post_html( $post ) {
+		$parts = [];
+		if ( ! empty( $post->post_title ) ) {
+			$parts[] = '<h1>' . esc_html( $post->post_title ) . '</h1>';
+		}
+		if ( ! empty( $post->post_excerpt ) ) {
+			$parts[] = '<p>' . esc_html( $post->post_excerpt ) . '</p>';
+		}
+		if ( ! empty( $post->post_content ) ) {
+			$parts[] = wpautop( strip_shortcodes( $post->post_content ) );
+		}
+
+		$title_keys = (array) apply_filters(
+			'gml_translation_crawler_seo_title_meta_keys',
+			[ '_yoast_wpseo_title', 'rank_math_title' ],
+			$post
+		);
+		$desc_keys = (array) apply_filters(
+			'gml_translation_crawler_seo_description_meta_keys',
+			[ '_yoast_wpseo_metadesc', 'rank_math_description' ],
+			$post
+		);
+		$seo_title = $this->first_post_meta( $post->ID, $title_keys );
+		$seo_desc  = $this->first_post_meta( $post->ID, $desc_keys );
+		if ( $seo_title !== '' ) {
+			$parts[] = '<meta name="title" content="' . esc_attr( $seo_title ) . '">';
+		}
+		if ( $seo_desc !== '' ) {
+			$parts[] = '<meta name="description" content="' . esc_attr( $seo_desc ) . '">';
+		}
+
+		if ( ( $post->post_type ?? '' ) === 'product' ) {
+			$attributes = get_post_meta( $post->ID, '_product_attributes', true );
+			if ( is_array( $attributes ) ) {
+				foreach ( $attributes as $attribute ) {
+					if ( ! empty( $attribute['name'] ) && ! empty( $attribute['value'] ) ) {
+						$parts[] = '<span>' . esc_html( $attribute['name'] ) . '</span>';
+						$parts[] = '<span>' . esc_html( $attribute['value'] ) . '</span>';
+					}
+				}
+			}
+		}
+
+		foreach ( get_object_taxonomies( $post->post_type ) as $taxonomy ) {
+			$terms = get_the_terms( $post->ID, $taxonomy );
+			if ( ! $terms || is_wp_error( $terms ) ) {
+				continue;
+			}
+			foreach ( $terms as $term ) {
+				$parts[] = '<span>' . esc_html( $term->name ) . '</span>';
+				if ( ! empty( $term->description ) ) {
+					$parts[] = '<p>' . esc_html( $term->description ) . '</p>';
+				}
+			}
+		}
+
+		return empty( $parts ) ? '' : '<html><body>' . implode( "\n", $parts ) . '</body></html>';
+	}
+
+	protected function first_post_meta( $post_id, array $keys ) {
+		foreach ( array_slice( array_values( array_unique( array_map( 'sanitize_key', $keys ) ) ), 0, 10 ) as $key ) {
+			$value = get_post_meta( $post_id, $key, true );
+			if ( is_scalar( $value ) && trim( (string) $value ) !== '' ) {
+				return (string) $value;
+			}
+		}
+		return '';
+	}
+
+	protected static function ai_translation_available() {
+		return class_exists( 'GML_Translation_State' )
+			&& GML_Translation_State::multilingual_enabled()
+			&& GML_Translation_State::ai_available();
+	}
+
+	protected static function safety_paused() {
+		if ( get_option( 'gml_translation_paused', false ) ) {
+			return true;
+		}
+		return class_exists( 'GML_Queue_Processor' )
+			&& ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() );
+	}
+
+	protected static function is_exact_site_url( $url ) {
+		if ( class_exists( 'GML_URL_Helper' ) ) {
+			return GML_URL_Helper::internal_absolute_path( $url ) !== null;
+		}
+
+		$home  = wp_parse_url( home_url( '/' ) );
+		$parts = wp_parse_url( $url );
+		if ( ! is_array( $home ) || ! is_array( $parts ) ) {
+			return false;
+		}
+		$default_port = static function( $scheme ) {
+			return strtolower( (string) $scheme ) === 'https' ? 443 : 80;
+		};
+		$home_scheme = strtolower( (string) ( $home['scheme'] ?? '' ) );
+		$url_scheme  = strtolower( (string) ( $parts['scheme'] ?? '' ) );
+		$home_port   = isset( $home['port'] ) ? (int) $home['port'] : $default_port( $home_scheme );
+		$url_port    = isset( $parts['port'] ) ? (int) $parts['port'] : $default_port( $url_scheme );
+		$home_path   = rtrim( (string) ( $home['path'] ?? '' ), '/' );
+		$url_path    = (string) ( $parts['path'] ?? '/' );
+		return $home_scheme !== ''
+			&& $home_scheme === $url_scheme
+			&& strtolower( (string) ( $home['host'] ?? '' ) ) === strtolower( (string) ( $parts['host'] ?? '' ) )
+			&& $home_port === $url_port
+			&& ( $home_path === '' || $home_path === '/' || $url_path === $home_path || strpos( $url_path, $home_path . '/' ) === 0 );
+	}
+
+	protected static function normalize_language( $language ) {
+		if ( class_exists( 'GML_Language_Utils' ) ) {
+			return GML_Language_Utils::normalize_code( $language );
+		}
+		return sanitize_key( str_replace( '_', '-', strtolower( (string) $language ) ) );
+	}
+
+	protected static function acquire_lock() {
+		$now     = time();
+		$expires = (int) get_option( static::LOCK_OPTION, 0 );
+		if ( $expires > $now ) {
+			return false;
+		}
+		if ( $expires > 0 ) {
+			delete_option( static::LOCK_OPTION );
+		}
+		return add_option( static::LOCK_OPTION, $now + 90, '', false );
+	}
+
+	protected static function release_lock() {
+		delete_option( static::LOCK_OPTION );
+	}
+
+	protected static function unschedule_crawl() {
+		wp_clear_scheduled_hook( static::CRON_HOOK );
+	}
+
+	protected static function log_event( $code, $post_id = 0 ) {
+		if ( ! defined( 'WP_DEBUG' ) || ! WP_DEBUG ) {
+			return;
+		}
+		error_log( sprintf( 'GML translation crawler [%s]%s', sanitize_key( $code ), $post_id > 0 ? ' post #' . (int) $post_id : '' ) );
+	}
+}
