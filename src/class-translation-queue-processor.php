@@ -460,7 +460,7 @@ abstract class GML_Translation_Queue_Processor {
         $message = strtolower( (string) $message );
         if ( $message === '' || strpos( $message, 'prompt blocked:' ) !== false ) return false;
         foreach ( [
-            'api key not configured', 'api http ', 'rate limit', 'quota', 'unauthorized',
+            'api key not configured', 'api http ', ' api error:', 'rate limit', 'quota', 'unauthorized',
             'forbidden', 'authentication', 'invalid api key', 'model not found',
             'model is no longer available', 'no text in ',
         ] as $pattern ) {
