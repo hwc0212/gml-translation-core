@@ -11,13 +11,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '2.5.0';
+    const DB_VERSION = '2.5.1';
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     public static function activate() {
         self::create_tables();
         self::set_default_options();
+        self::disable_large_option_autoload();
         self::create_cache_directory();
         self::maybe_import_weglot_config();
         update_option( 'gml_db_version', self::DB_VERSION );
@@ -173,10 +174,46 @@ class GML_Installer {
             'gml_glossary_rules'       => [],
         ];
 
+        $non_autoload = [
+            'gml_protected_terms',
+            'gml_exclude_selectors',
+            'gml_exclusion_rules',
+            'gml_glossary_rules',
+        ];
         foreach ( $defaults as $key => $value ) {
             if ( false === get_option( $key ) ) {
-                add_option( $key, $value );
+                add_option( $key, $value, '', ! in_array( $key, $non_autoload, true ) );
             }
+        }
+    }
+
+    /** Keep potentially large rule arrays out of every WordPress request. */
+    private static function disable_large_option_autoload() {
+        global $wpdb;
+
+        $options = [
+            'gml_protected_terms',
+            'gml_exclude_selectors',
+            'gml_exclusion_rules',
+            'gml_glossary_rules',
+        ];
+        if ( function_exists( 'wp_set_option_autoload_values' ) ) {
+            wp_set_option_autoload_values( array_fill_keys( $options, false ) );
+            return;
+        }
+
+        // WordPress 6.0-6.5 does not expose the bulk autoload API. The option
+        // names are fixed constants, values are untouched, and caches are
+        // invalidated after the one-time versioned migration.
+        $placeholders = implode( ', ', array_fill( 0, count( $options ), '%s' ) );
+        $sql = $wpdb->prepare(
+            "UPDATE {$wpdb->options} SET autoload = 'no' WHERE option_name IN ({$placeholders})",
+            $options
+        );
+        $wpdb->query( $sql );
+        wp_cache_delete( 'alloptions', 'options' );
+        foreach ( $options as $option ) {
+            wp_cache_delete( $option, 'options' );
         }
     }
 
