@@ -10,9 +10,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class GML_Translation_Translator {
+	const MAX_SOURCE_BYTES = 32768;
 
     private static $memory_cache = [];
-    private static $dict_loaded = [];
+	private static $known_missing = [];
+	private static $dict_loaded   = [];
 
     public function translate( $parsed, $target_lang ) {
         global $wpdb;
@@ -25,12 +27,11 @@ class GML_Translation_Translator {
             return $parsed;
         }
 
-        $this->maybe_preload_dictionary( $source_lang, $target_lang );
         $unique = [];
         foreach ( $nodes as $item ) {
             $hash = sanitize_text_field( $item['hash'] ?? '' );
             $text = (string) ( $item['text'] ?? '' );
-            if ( $hash !== '' && $text !== '' && ! isset( $unique[ $hash ] ) ) {
+            if ( preg_match( '/^[a-f0-9]{32}$/', $hash ) && $text !== '' && ! isset( $unique[ $hash ] ) ) {
                 $unique[ $hash ] = [
                     'text'         => $text,
                     'context_type' => sanitize_key( $item['context_type'] ?? 'text' ) ?: 'text',
@@ -38,7 +39,7 @@ class GML_Translation_Translator {
             }
         }
 
-        $dictionary = self::$memory_cache[ $target_lang ] ?? [];
+		$dictionary = $this->load_dictionary_for_hashes( $source_lang, $target_lang, array_keys( $unique ) );
         $uncached   = [];
         foreach ( $unique as $hash => $item ) {
             if ( isset( $dictionary[ $hash ] ) ) {
@@ -69,6 +70,9 @@ class GML_Translation_Translator {
                 if ( isset( $already_queued[ $hash ] ) ) {
                     continue;
                 }
+				if ( strlen( $item['text'] ) > self::MAX_SOURCE_BYTES ) {
+					continue;
+				}
                 // The Core 2.5 queue has a unique (hash, source, target) key.
                 // INSERT IGNORE makes concurrent logged-out page requests safe.
                 $wpdb->query( $wpdb->prepare(
@@ -94,50 +98,73 @@ class GML_Translation_Translator {
         return class_exists( 'GML_Translation_State' ) && GML_Translation_State::ai_available();
     }
 
-    private function maybe_preload_dictionary( $source_lang, $target_lang ) {
-        if ( ! empty( self::$dict_loaded[ $target_lang ] ) ) {
-            return;
-        }
-        $cache_key = 'gml_dict_' . $source_lang . '_' . $target_lang;
-        $cached    = wp_cache_get( $cache_key, 'gml_translate' );
-        if ( is_array( $cached ) ) {
-            self::$memory_cache[ $target_lang ] = $cached;
-            self::$dict_loaded[ $target_lang ]  = true;
-            return;
-        }
+	private function load_dictionary_for_hashes( $source_lang, $target_lang, array $hashes ) {
+		global $wpdb;
+		$pair = self::pair_key( $source_lang, $target_lang );
+		if ( ! isset( self::$memory_cache[ $pair ] ) ) self::$memory_cache[ $pair ] = [];
+		if ( ! isset( self::$known_missing[ $pair ] ) ) self::$known_missing[ $pair ] = [];
 
-        global $wpdb;
-        $table = $wpdb->prefix . 'gml_index';
-        $rows  = $wpdb->get_results( $wpdb->prepare(
-            "SELECT source_hash, translated_text FROM $table
-             WHERE source_lang = %s AND target_lang = %s AND status IN ('auto','manual')",
-            $source_lang,
-            $target_lang
-        ) );
-        $dictionary = [];
-        foreach ( (array) $rows as $row ) {
-            $translated = (string) $row->translated_text;
-            if ( strpos( $translated, '<' ) !== false ) {
-                $translated = wp_strip_all_tags( $translated );
-            }
-            $dictionary[ $row->source_hash ] = $translated;
-        }
-        self::$memory_cache[ $target_lang ] = $dictionary;
-        self::$dict_loaded[ $target_lang ]  = true;
-        wp_cache_set( $cache_key, $dictionary, 'gml_translate', 300 );
-    }
+		$missing = [];
+		foreach ( array_values( array_unique( $hashes ) ) as $hash ) {
+			if ( ! isset( self::$memory_cache[ $pair ][ $hash ] ) && ! isset( self::$known_missing[ $pair ][ $hash ] ) ) {
+				$missing[] = $hash;
+			}
+		}
+		if ( empty( $missing ) ) return self::$memory_cache[ $pair ];
+
+		$table = $wpdb->prefix . 'gml_index';
+		foreach ( array_chunk( $missing, 500 ) as $chunk ) {
+			$placeholders = implode( ',', array_fill( 0, count( $chunk ), '%s' ) );
+			$rows = $wpdb->get_results( $wpdb->prepare(
+				"SELECT source_hash, translated_text FROM $table
+				 WHERE source_hash IN ($placeholders)
+				 AND source_lang = %s AND target_lang = %s AND status IN ('auto','manual')",
+				array_merge( $chunk, [ $source_lang, $target_lang ] )
+			) );
+			foreach ( (array) $rows as $row ) {
+				$translated = (string) $row->translated_text;
+				self::$memory_cache[ $pair ][ $row->source_hash ] = strpos( $translated, '<' ) !== false
+					? wp_strip_all_tags( $translated )
+					: $translated;
+			}
+			foreach ( $chunk as $hash ) {
+				if ( ! isset( self::$memory_cache[ $pair ][ $hash ] ) ) self::$known_missing[ $pair ][ $hash ] = true;
+			}
+		}
+		return self::$memory_cache[ $pair ];
+	}
 
     public static function invalidate_cache( $source_lang, $target_lang ) {
         $source_lang = sanitize_key( $source_lang );
         $target_lang = sanitize_key( $target_lang );
         wp_cache_delete( 'gml_dict_' . $source_lang . '_' . $target_lang, 'gml_translate' );
-        unset( self::$memory_cache[ $target_lang ], self::$dict_loaded[ $target_lang ] );
+		$pair = self::pair_key( $source_lang, $target_lang );
+        unset( self::$memory_cache[ $pair ], self::$known_missing[ $pair ], self::$dict_loaded[ $pair ] );
     }
 
     public function get_dictionary( $target_lang ) {
+		global $wpdb;
+		$source_lang = sanitize_key( get_option( 'gml_source_lang', 'en' ) );
         $target_lang = sanitize_key( $target_lang );
-        $this->maybe_preload_dictionary( sanitize_key( get_option( 'gml_source_lang', 'en' ) ), $target_lang );
-        return self::$memory_cache[ $target_lang ] ?? [];
+		$pair = self::pair_key( $source_lang, $target_lang );
+		if ( empty( self::$dict_loaded[ $pair ] ) ) {
+			$table = $wpdb->prefix . 'gml_index';
+			$rows  = $wpdb->get_results( $wpdb->prepare(
+				"SELECT source_hash, translated_text FROM $table
+				 WHERE source_lang = %s AND target_lang = %s AND status IN ('auto','manual')",
+				$source_lang,
+				$target_lang
+			) );
+			self::$memory_cache[ $pair ] = [];
+			foreach ( (array) $rows as $row ) {
+				$translated = (string) $row->translated_text;
+				self::$memory_cache[ $pair ][ $row->source_hash ] = strpos( $translated, '<' ) !== false
+					? wp_strip_all_tags( $translated )
+					: $translated;
+			}
+			self::$dict_loaded[ $pair ] = true;
+		}
+        return self::$memory_cache[ $pair ] ?? [];
     }
 
     public function save_to_index( $hash, $source_text, $translated_text, $source_lang, $target_lang, $context_type = 'text', $status = 'auto' ) {
@@ -175,11 +202,13 @@ class GML_Translation_Translator {
             return false;
         }
 
-        if ( isset( self::$memory_cache[ $target_lang ] ) ) {
+		$pair = self::pair_key( $source_lang, $target_lang );
+        if ( isset( self::$memory_cache[ $pair ] ) ) {
             $clean = (string) $translated_text;
-            self::$memory_cache[ $target_lang ][ $hash ] = strpos( $clean, '<' ) !== false
+			self::$memory_cache[ $pair ][ $hash ] = strpos( $clean, '<' ) !== false
                 ? wp_strip_all_tags( $clean )
                 : $clean;
+			unset( self::$known_missing[ $pair ][ $hash ] );
         }
         wp_cache_delete( 'gml_dict_' . $source_lang . '_' . $target_lang, 'gml_translate' );
         return true;
@@ -193,4 +222,8 @@ class GML_Translation_Translator {
         if ( $length < 200 ) return 5;
         return 3;
     }
+
+	private static function pair_key( $source_lang, $target_lang ) {
+		return sanitize_key( $source_lang ) . '>' . sanitize_key( $target_lang );
+	}
 }

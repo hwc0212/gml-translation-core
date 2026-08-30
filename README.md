@@ -16,6 +16,10 @@ bounded content crawling, translated HTML caching, parsing, glossary and
 exclusion logic, language/URL utilities, and read-only translated URL
 relationships.
 
+Runtime lookups load only translation hashes used by the current page. Core
+does not place an entire language dictionary into PHP or a persistent object
+cache during ordinary frontend requests.
+
 Core must not register product menus, decide which plugin owns SEO output, read
 product-specific settings pages, or emit competing canonical/hreflang/sitemap
 markup. Product adapters supply credentials and product state, select the SEO

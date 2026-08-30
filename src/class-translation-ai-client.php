@@ -20,6 +20,10 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
     const STYLE_GEMINI = 'gemini';
     const STYLE_OPENAI = 'openai';
     const MAX_BATCH_ITEMS = 30;
+	const MAX_API_KEY_BYTES = 512;
+	const MAX_SYSTEM_BYTES  = 49152;
+	const MAX_PROMPT_BYTES  = 262144;
+	const MAX_OUTPUT_BYTES  = 60000;
 
     private $engine;
     private $api_key;
@@ -36,8 +40,9 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
 
     public function __construct( array $config ) {
         $this->engine        = sanitize_key( $config['engine'] ?? '' );
-        $this->api_key       = (string) ( $config['api_key'] ?? '' );
-        $this->model         = sanitize_text_field( $config['model'] ?? '' );
+        $api_key             = trim( (string) ( $config['api_key'] ?? '' ) );
+		$this->api_key       = strlen( $api_key ) <= self::MAX_API_KEY_BYTES ? $api_key : '';
+        $this->model         = substr( sanitize_text_field( $config['model'] ?? '' ), 0, 120 );
         $this->label         = sanitize_text_field( $config['label'] ?? 'AI' );
         $this->style         = ( $config['style'] ?? '' ) === self::STYLE_OPENAI ? self::STYLE_OPENAI : self::STYLE_GEMINI;
         $this->base_url      = untrailingslashit( (string) ( $config['base_url'] ?? '' ) );
@@ -45,8 +50,8 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             return strtolower( trim( (string) $host ) );
         }, (array) ( $config['allowed_hosts'] ?? [] ) ) ) ) );
         $this->protected_terms = $this->sanitize_protected_terms( $config['protected_terms'] ?? [] );
-        $this->site_name       = sanitize_text_field( $config['site_name'] ?? '' );
-        $this->tone            = sanitize_text_field( $config['tone'] ?? 'professional and friendly' );
+		$this->site_name       = self::truncate_text( sanitize_text_field( $config['site_name'] ?? '' ), 200 );
+		$this->tone            = self::truncate_text( sanitize_text_field( $config['tone'] ?? 'professional and friendly' ), 200 );
         $this->transport       = isset( $config['transport'] ) && $config['transport'] instanceof GML_AI_HTTP_Transport
             ? $config['transport']
             : new GML_AI_HTTP_Transport();
@@ -81,10 +86,22 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             return [ 'ok' => false, 'text' => '', 'error' => $this->last_error ];
         }
 
+		$system = isset( $request['system'] ) ? (string) $request['system'] : '';
+		$prompt = isset( $request['prompt'] ) ? (string) $request['prompt'] : '';
+		if ( strlen( $system ) > self::MAX_SYSTEM_BYTES || strlen( $prompt ) > self::MAX_PROMPT_BYTES ) {
+			$this->last_error = [
+				'code'      => 'request_too_large',
+				'message'   => 'Translation request exceeds the local safety limit.',
+				'status'    => 0,
+				'retryable' => false,
+			];
+			return [ 'ok' => false, 'text' => '', 'error' => $this->last_error ];
+		}
+
         try {
             $response = $this->call_api(
-                isset( $request['system'] ) ? (string) $request['system'] : '',
-                isset( $request['prompt'] ) ? (string) $request['prompt'] : '',
+				$system,
+				$prompt,
                 isset( $request['max_tokens'] ) ? (int) $request['max_tokens'] : 4096,
                 isset( $request['retries'] ) ? (int) $request['retries'] : 1
             );
@@ -258,6 +275,9 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         if ( ! is_string( $text ) ) {
             throw new RuntimeException( 'No text in ' . $this->label . ' API response' );
         }
+		if ( strlen( $text ) > self::MAX_OUTPUT_BYTES ) {
+			throw new RuntimeException( 'Provider output exceeds the local storage safety limit.' );
+		}
         return $this->clean_output( $text );
     }
 
@@ -332,6 +352,11 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         }
         return array_values( array_unique( $safe ) );
     }
+
+	private static function truncate_text( $value, $length ) {
+		$value = trim( (string) $value );
+		return function_exists( 'mb_substr' ) ? mb_substr( $value, 0, $length ) : substr( $value, 0, $length );
+	}
 
     private function language_name( $code ) {
         $map = [

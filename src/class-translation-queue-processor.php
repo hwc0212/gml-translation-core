@@ -26,6 +26,7 @@ abstract class GML_Translation_Queue_Processor {
     const SINGLE_FALLBACK_LIMIT = 3;
     const LOCK_TTL = 600;
     const BATCH_SIZE = 30;
+	const MAX_BATCH_INPUT_BYTES = 131072;
 
     public function __construct() {
         add_filter( 'cron_schedules', [ $this, 'add_cron_interval' ] );
@@ -62,10 +63,7 @@ abstract class GML_Translation_Queue_Processor {
     }
 
     public static function unschedule_cron() {
-        $timestamp = wp_next_scheduled( static::CRON_HOOK );
-        if ( $timestamp ) {
-            wp_unschedule_event( $timestamp, static::CRON_HOOK );
-        }
+		wp_clear_scheduled_hook( static::CRON_HOOK );
     }
 
     protected function translation_work_enabled() {
@@ -148,6 +146,26 @@ abstract class GML_Translation_Queue_Processor {
                 return $item->target_lang === $first->target_lang
                     && static::api_type( $item->context_type ?? '' ) === $first_type;
             } ) );
+			$bounded_items = [];
+			$input_bytes   = 0;
+			$max_item      = class_exists( 'GML_Translator' ) ? GML_Translator::MAX_SOURCE_BYTES : 32768;
+			foreach ( $items as $item ) {
+				$item_bytes = strlen( (string) $item->source_text );
+				if ( $item_bytes > $max_item ) {
+					$wpdb->update( $queue_table, [
+						'status'        => 'failed',
+						'attempts'      => 3,
+						'error_message' => 'Source segment exceeds the translation size limit.',
+					], [ 'id' => (int) $item->id ] );
+					continue;
+				}
+				if ( $bounded_items && $input_bytes + $item_bytes > static::MAX_BATCH_INPUT_BYTES ) {
+					break;
+				}
+				$bounded_items[] = $item;
+				$input_bytes += $item_bytes;
+			}
+			$items = $bounded_items;
             $ids = array_map( static function( $item ) { return (int) $item->id; }, $items );
             if ( empty( $ids ) ) {
                 return;
@@ -323,7 +341,9 @@ abstract class GML_Translation_Queue_Processor {
         } catch ( Throwable $exception ) {
             unset( $exception );
             $this->fail_or_retry_item( $wpdb, $table, $item, 'Local translation save failed' );
-            error_log( 'GML: Local translation save failed for queue item #' . (int) $item->id . '.' );
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( 'GML: Local translation save failed for queue item #' . (int) $item->id . '.' );
+			}
             return false;
         }
     }
