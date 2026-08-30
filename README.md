@@ -10,12 +10,15 @@ a third runtime plugin.
 
 ## Boundaries
 
-Core may own translation state, storage schema, parsing, glossary and exclusion
-logic, language/URL utilities, and read-only translated URL relationships.
+Core owns translation state, storage schema, translation memory, safe AI
+transport, translation prompts, bounded queue processing, manual editor logic,
+translated HTML caching, parsing, glossary and exclusion logic, language/URL
+utilities, and read-only translated URL relationships.
 
 Core must not register product menus, decide which plugin owns SEO output, read
 product-specific settings pages, or emit competing canonical/hreflang/sitemap
-markup. Product adapters explicitly register all WordPress hooks.
+markup. Product adapters supply credentials and product state, select the SEO
+authority, and expose the appropriate WordPress administration experience.
 
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.

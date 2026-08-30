@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '2.4.0';
+    const DB_VERSION = '2.5.0';
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -63,6 +63,7 @@ class GML_Installer {
 
         // Async translation queue
         $t = $wpdb->prefix . 'gml_queue';
+        self::deduplicate_queue_rows( $t );
         dbDelta( "CREATE TABLE $t (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             source_hash CHAR(32) NOT NULL,
@@ -77,6 +78,7 @@ class GML_Installer {
             created_at DATETIME NOT NULL,
             processed_at DATETIME,
             PRIMARY KEY  (id),
+            UNIQUE KEY queue_hash_lang (source_hash, source_lang, target_lang),
             KEY idx_status_priority (status, priority),
             KEY idx_hash (source_hash)
         ) $cc;" );
@@ -100,6 +102,45 @@ class GML_Installer {
         // them so they get re-translated with the correct context_type.
         $wpdb->query( "DELETE FROM {$wpdb->prefix}gml_index WHERE context_type = ''" );
         $wpdb->query( "DELETE FROM {$wpdb->prefix}gml_queue WHERE context_type = ''" );
+    }
+
+    /**
+     * Keep the most useful row for each language pair before adding the unique
+     * queue key. Queue rows are work state, not translation memory; the count is
+     * retained for upgrade diagnostics instead of silently disappearing.
+     */
+    private static function deduplicate_queue_rows( $table ) {
+        global $wpdb;
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+        if ( $exists !== $table ) {
+            return;
+        }
+
+        $older_rank = "CASE older.status
+            WHEN 'completed' THEN 4
+            WHEN 'processing' THEN 3
+            WHEN 'pending' THEN 2
+            ELSE 1 END";
+        $preferred_rank = "CASE preferred.status
+            WHEN 'completed' THEN 4
+            WHEN 'processing' THEN 3
+            WHEN 'pending' THEN 2
+            ELSE 1 END";
+        $deleted = $wpdb->query(
+            "DELETE older FROM $table older
+             INNER JOIN $table preferred
+                ON older.source_hash = preferred.source_hash
+               AND older.source_lang = preferred.source_lang
+               AND older.target_lang = preferred.target_lang
+               AND (
+                    ($older_rank) < ($preferred_rank)
+                    OR (($older_rank) = ($preferred_rank) AND older.id > preferred.id)
+               )"
+        );
+        if ( $deleted > 0 ) {
+            $total = max( 0, (int) get_option( 'gml_queue_deduplicated_count', 0 ) ) + (int) $deleted;
+            update_option( 'gml_queue_deduplicated_count', $total, false );
+        }
     }
 
     // ── Default options ───────────────────────────────────────────────────────
