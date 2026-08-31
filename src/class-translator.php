@@ -49,7 +49,27 @@ class GML_Translation_Translator {
             }
         }
 
-        if ( $uncached && $this->ai_translation_available() ) {
+        if ( $uncached && $this->ai_translation_available()
+            && ! get_option( 'gml_translation_paused', false )
+            && ! is_array( get_option( 'gml_translation_circuit_breaker', false ) ) ) {
+            $this->enqueue_missing( $uncached, $source_lang, $target_lang );
+        }
+
+        $parsed['replacements'] = $replacements;
+        return $parsed;
+    }
+
+    public static function enqueue_lock_name( $source_lang, $target_lang ) {
+        global $wpdb;
+        return 'gml-enqueue-' . md5( DB_NAME . ':' . $wpdb->prefix . ':' . $source_lang . ':' . $target_lang );
+    }
+
+    private function enqueue_missing( array $uncached, $source_lang, $target_lang ) {
+        global $wpdb;
+        $lock = self::enqueue_lock_name( $source_lang, $target_lang );
+        // Legacy queues lack a unique key. Never wait on a competing page request.
+        if ( (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 0)', $lock ) ) !== 1 ) return;
+        try {
             $queue_table    = $wpdb->prefix . 'gml_queue';
             $already_queued = [];
             foreach ( array_chunk( array_keys( $uncached ), 500 ) as $hashes ) {
@@ -73,8 +93,7 @@ class GML_Translation_Translator {
 				if ( strlen( $item['text'] ) > self::MAX_SOURCE_BYTES ) {
 					continue;
 				}
-                // The Core 2.5 queue has a unique (hash, source, target) key.
-                // INSERT IGNORE makes concurrent logged-out page requests safe.
+                // Rechecking inside the lock also protects unchanged legacy tables.
                 $wpdb->query( $wpdb->prepare(
                     "INSERT IGNORE INTO $queue_table
                         (source_hash, source_text, source_lang, target_lang, context_type, priority, status, attempts, created_at)
@@ -88,10 +107,9 @@ class GML_Translation_Translator {
                     $now
                 ) );
             }
+        } finally {
+            $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
         }
-
-        $parsed['replacements'] = $replacements;
-        return $parsed;
     }
 
     protected function ai_translation_available() {

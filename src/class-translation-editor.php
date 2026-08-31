@@ -220,8 +220,12 @@ class GML_Translation_Editor_Core {
             if ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() ) {
                 wp_send_json_error( __( 'Translation is safety-paused. Test the saved AI connection and retry one limited language sample first.', static::TEXT_DOMAIN ) );
             }
-            if ( ! GML_Content_Crawler::start_crawl() ) {
-                wp_send_json_error( __( 'Content crawl could not start while translation safety controls are active.', static::TEXT_DOMAIN ) );
+            $started = GML_Content_Crawler::start_crawl( true );
+            if ( is_wp_error( $started ) ) {
+                wp_send_json_error( $started->get_error_message() );
+            }
+            if ( ! $started ) {
+                wp_send_json_error( __( 'WordPress could not schedule the content crawl. The translation queue remains unchanged.', static::TEXT_DOMAIN ) );
             }
 
             // Resume the AI worker without changing multilingual site output.
@@ -233,11 +237,6 @@ class GML_Translation_Editor_Core {
                 $l['paused'] = false;
             }
             update_option( 'gml_languages', $langs );
-
-            // Ensure queue processor cron is scheduled
-            if ( ! wp_next_scheduled( GML_Queue_Processor::CRON_HOOK ) ) {
-                wp_schedule_single_event( time(), GML_Queue_Processor::CRON_HOOK );
-            }
 
             wp_send_json_success( [ 'message' => __( 'Content crawl started.', static::TEXT_DOMAIN ) ] );
         } elseif ( $action === 'stop' ) {

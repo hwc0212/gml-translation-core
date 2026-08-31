@@ -11,18 +11,83 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '2.5.1';
+    const DB_VERSION = '2.5.2';
+    const ERROR_OPTION = 'gml_translation_db_error';
+
+    public static function register_hooks() {
+        add_action( 'admin_init', [ __CLASS__, 'maybe_upgrade' ] );
+        add_action( 'admin_notices', [ __CLASS__, 'upgrade_notice' ] );
+    }
+
+    public static function maybe_upgrade() {
+        if ( ! is_admin() || wp_doing_ajax() || wp_doing_cron() || ! current_user_can( 'manage_options' ) ) {
+            return false;
+        }
+        if ( ! version_compare( get_option( 'gml_db_version', '0' ), self::DB_VERSION, '<' ) ) {
+            return true;
+        }
+        $error = (array) get_option( self::ERROR_OPTION, [] );
+        if ( (int) ( $error['retry_after'] ?? 0 ) > time() ) {
+            return false;
+        }
+        return self::activate();
+    }
+
+    public static function upgrade_notice() {
+        if ( ! current_user_can( 'manage_options' ) || ! get_option( self::ERROR_OPTION ) ) return;
+        echo '<div class="notice notice-error"><p>' . esc_html__( 'GML translation database setup did not complete. Existing translation data has been kept. Check database availability before retrying from the admin area.', 'gml-translate' ) . '</p></div>';
+    }
+
+    public static function lock_name() {
+        global $wpdb;
+        return 'gml-install-' . md5( DB_NAME . ':' . $wpdb->prefix );
+    }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     public static function activate() {
-        self::create_tables();
-        self::set_default_options();
-        self::disable_large_option_autoload();
-        self::create_cache_directory();
-        self::maybe_import_weglot_config();
-        update_option( 'gml_db_version', self::DB_VERSION );
-        flush_rewrite_rules();
+        global $wpdb;
+        $lock = self::lock_name();
+        if ( (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 0)', $lock ) ) !== 1 ) {
+            return new WP_Error( 'gml_install_busy', 'Translation database setup is already running or unavailable.' );
+        }
+        $old_timeout = null;
+        try {
+            $old_timeout = (int) $wpdb->get_var( 'SELECT @@SESSION.lock_wait_timeout' );
+            self::execute( 'SET SESSION lock_wait_timeout = 2' );
+            self::create_tables();
+            self::set_default_options();
+            self::disable_large_option_autoload();
+            self::create_cache_directory();
+            self::maybe_import_weglot_config();
+            update_option( 'gml_db_version', self::DB_VERSION, false );
+            if ( get_option( 'gml_db_version' ) !== self::DB_VERSION ) {
+                throw new RuntimeException( 'version_write_failed' );
+            }
+            delete_option( self::ERROR_OPTION );
+            return true;
+        } catch ( Throwable $error ) {
+            update_option( self::ERROR_OPTION, [ 'retry_after' => time() + 60 ], false );
+            return new WP_Error( 'gml_install_failed', 'Translation database setup failed. Existing data has been kept.' );
+        } finally {
+            if ( $old_timeout !== null ) {
+                $wpdb->query( 'SET SESSION lock_wait_timeout = ' . max( 1, $old_timeout ) );
+            }
+            $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+        }
+    }
+
+    private static function execute( $sql ) {
+        global $wpdb;
+        if ( $wpdb->query( $sql ) === false ) throw new RuntimeException( 'database_setup_failed' );
+    }
+
+    private static function create_if_missing( $table, $sql ) {
+        global $wpdb;
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+        if ( $wpdb->last_error !== '' ) throw new RuntimeException( 'table_check_failed' );
+        // Existing schemas are supported without ALTER, deduplication, or data deletion.
+        if ( $exists !== $table ) self::execute( $sql );
     }
 
     public static function deactivate() {
@@ -41,11 +106,10 @@ class GML_Installer {
     private static function create_tables() {
         global $wpdb;
         $cc = $wpdb->get_charset_collate();
-        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 
         // Translation memory — global hash index
         $t = $wpdb->prefix . 'gml_index';
-        dbDelta( "CREATE TABLE $t (
+        self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             source_hash CHAR(32) NOT NULL,
             source_text TEXT NOT NULL,
@@ -64,8 +128,7 @@ class GML_Installer {
 
         // Async translation queue
         $t = $wpdb->prefix . 'gml_queue';
-        self::deduplicate_queue_rows( $t );
-        dbDelta( "CREATE TABLE $t (
+        self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             source_hash CHAR(32) NOT NULL,
             source_text TEXT NOT NULL,
@@ -84,64 +147,6 @@ class GML_Installer {
             KEY idx_hash (source_hash)
         ) $cc;" );
 
-        // ── Migrate ENUM → VARCHAR for context_type if needed ────────────────
-        // dbDelta() cannot modify existing column types. If the tables already
-        // exist with ENUM context_type, we must ALTER them directly.
-        $idx_col = $wpdb->get_row( "SHOW COLUMNS FROM {$wpdb->prefix}gml_index LIKE 'context_type'" );
-        if ( $idx_col && stripos( $idx_col->Type, 'enum' ) !== false ) {
-            $wpdb->query( "ALTER TABLE {$wpdb->prefix}gml_index MODIFY context_type VARCHAR(20) DEFAULT 'text'" );
-        }
-        $q_col = $wpdb->get_row( "SHOW COLUMNS FROM {$wpdb->prefix}gml_queue LIKE 'context_type'" );
-        if ( $q_col && stripos( $q_col->Type, 'enum' ) !== false ) {
-            $wpdb->query( "ALTER TABLE {$wpdb->prefix}gml_queue MODIFY context_type VARCHAR(20) DEFAULT 'text'" );
-        }
-
-        // ── Clean up rows with empty context_type ────────────────────────────
-        // When ENUM didn't include 'seo_title', MySQL stored it as '' (empty
-        // string). These rows have corrupted translations (title+description
-        // merged by Gemini because they ended up in the same batch). Delete
-        // them so they get re-translated with the correct context_type.
-        $wpdb->query( "DELETE FROM {$wpdb->prefix}gml_index WHERE context_type = ''" );
-        $wpdb->query( "DELETE FROM {$wpdb->prefix}gml_queue WHERE context_type = ''" );
-    }
-
-    /**
-     * Keep the most useful row for each language pair before adding the unique
-     * queue key. Queue rows are work state, not translation memory; the count is
-     * retained for upgrade diagnostics instead of silently disappearing.
-     */
-    private static function deduplicate_queue_rows( $table ) {
-        global $wpdb;
-        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
-        if ( $exists !== $table ) {
-            return;
-        }
-
-        $older_rank = "CASE older.status
-            WHEN 'completed' THEN 4
-            WHEN 'processing' THEN 3
-            WHEN 'pending' THEN 2
-            ELSE 1 END";
-        $preferred_rank = "CASE preferred.status
-            WHEN 'completed' THEN 4
-            WHEN 'processing' THEN 3
-            WHEN 'pending' THEN 2
-            ELSE 1 END";
-        $deleted = $wpdb->query(
-            "DELETE older FROM $table older
-             INNER JOIN $table preferred
-                ON older.source_hash = preferred.source_hash
-               AND older.source_lang = preferred.source_lang
-               AND older.target_lang = preferred.target_lang
-               AND (
-                    ($older_rank) < ($preferred_rank)
-                    OR (($older_rank) = ($preferred_rank) AND older.id > preferred.id)
-               )"
-        );
-        if ( $deleted > 0 ) {
-            $total = max( 0, (int) get_option( 'gml_queue_deduplicated_count', 0 ) ) + (int) $deleted;
-            update_option( 'gml_queue_deduplicated_count', $total, false );
-        }
     }
 
     // ── Default options ───────────────────────────────────────────────────────
@@ -210,7 +215,7 @@ class GML_Installer {
             "UPDATE {$wpdb->options} SET autoload = 'no' WHERE option_name IN ({$placeholders})",
             $options
         );
-        $wpdb->query( $sql );
+        self::execute( $sql );
         wp_cache_delete( 'alloptions', 'options' );
         foreach ( $options as $option ) {
             wp_cache_delete( $option, 'options' );
