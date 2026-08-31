@@ -5,7 +5,14 @@ require getenv( 'GML_TEST_WP_ROOT' ) . '/wp-load.php';
 if ( DB_NAME !== 'gml_regression' || $wpdb->prefix !== 'test_' || WP_HOME !== 'http://127.0.0.1:8941' ) exit( 2 );
 require_once ABSPATH . 'wp-admin/includes/plugin.php';
 $slug = $argv[1] ?? '';
+if ( $slug === 'reset' ) {
+    deactivate_plugins( get_option( 'active_plugins', [] ) );
+    exit( "Local UI plugins deactivated. Start the next product in a fresh process.\n" );
+}
 if ( ! in_array( $slug, [ 'gml-seo', 'gml-translate' ], true ) ) exit( 2 );
+if ( array_diff( (array) get_option( 'active_plugins', [] ), [ $slug . '/' . $slug . '.php' ] ) ) {
+    exit( "Run ui-setup.php reset in a separate process before switching products.\n" );
+}
 deactivate_plugins( get_option( 'active_plugins', [] ) );
 update_option( 'gml_multilingual_enabled', true );
 update_option( 'gml_ai_translation_enabled', true );

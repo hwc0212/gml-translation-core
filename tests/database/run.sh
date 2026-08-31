@@ -35,4 +35,5 @@ for i in {1..8}; do
 done
 for pid in "${pids[@]}"; do wait "$pid"; done
 php "$ROOT/lifecycle.php" deactivate
+php "$ROOT/activation-conflict.php"
 echo "OK real WordPress / MariaDB regressions for $GML_TEST_PRODUCT_DIR"
