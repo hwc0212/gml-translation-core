@@ -35,6 +35,22 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.4.9 Gemini Responses And Cache Confirmation
+
+The shared Gemini parser collects final text across parts, excludes thought
+parts, and rejects truncated, blocked or empty output. Diagnostics contain only
+allowlisted finish reasons and bounded token counts, never raw response text or
+credentials. Translation and SEO adapters use the same parser. Explicit tests
+have a 1024-token budget and do not retry automatically; no model is changed.
+
+Manual page-cache refresh requires the literal REFRESH confirmation in addition
+to administrator capability and nonce checks, including legacy clear actions.
+Automatic content-change invalidation is unaffected. Cache commands preserve
+translation storage, manual edits, queue records and all pause/safety settings.
+
+References: https://ai.google.dev/api/generate-content and
+https://ai.google.dev/gemini-api/docs/generate-content/thinking?hl=en
+
 ## 0.4.8 Independent Queue Controls
 
 Normal pending work and approved failed-item samples have separate controls.

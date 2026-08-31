@@ -16,6 +16,7 @@ require_once __DIR__ . '/interface-translation-ai-provider.php';
 require_once __DIR__ . '/class-ai-http-transport.php';
 require_once __DIR__ . '/class-translation-text.php';
 require_once __DIR__ . '/class-translation-credentials.php';
+require_once __DIR__ . '/class-gemini-response.php';
 
 class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface {
 
@@ -87,6 +88,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
     }
 
     public function generate( array $request ) {
+        $this->last_error = null;
         $validation = $this->validate_credentials();
         if ( ! $validation['valid'] ) {
             $this->last_error = [ 'code' => 'provider_not_configured', 'message' => $validation['message'] ];
@@ -116,7 +118,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             $this->last_error = null;
             return [ 'ok' => true, 'text' => $text, 'error' => null ];
         } catch ( Throwable $exception ) {
-            $this->last_error = $this->transport->get_last_error() ?: [
+            $this->last_error = $this->last_error ?: $this->transport->get_last_error() ?: [
                 'code'      => 'provider_error',
                 'message'   => GML_AI_HTTP_Transport::redact( $exception->getMessage() ),
                 'status'    => 0,
@@ -140,9 +142,9 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
 
     public function test_connection() {
         $result = $this->generate( [
-            'system'     => 'You are a translator. Return only the translation.',
-            'prompt'     => 'Translate "Hello" to Chinese.',
-            'max_tokens' => 20,
+            'system'     => 'Return only the requested short answer.',
+            'prompt'     => 'Reply with OK only.',
+            'max_tokens' => GML_Gemini_Response::TEST_MAX_TOKENS,
             'retries'    => 0,
         ] );
         $valid = ! empty( $result['ok'] ) && trim( (string) ( $result['text'] ?? '' ) ) !== '';
@@ -276,10 +278,11 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
                 throw new RuntimeException( $this->label . ' API error: ' . GML_AI_HTTP_Transport::redact( $response['error']['message'] ) );
             }
         } else {
-            if ( isset( $response['promptFeedback']['blockReason'] ) ) {
-                throw new RuntimeException( 'Prompt blocked: ' . sanitize_text_field( $response['promptFeedback']['blockReason'] ) );
+            $text = GML_Gemini_Response::text( $response );
+            if ( is_wp_error( $text ) ) {
+                $this->last_error = [ 'code' => $text->get_error_code(), 'message' => $text->get_error_message(), 'status' => 200, 'retryable' => false ];
+                throw new RuntimeException( $text->get_error_message() );
             }
-            $text = $response['candidates'][0]['content']['parts'][0]['text'] ?? null;
         }
         if ( ! is_string( $text ) ) {
             throw new RuntimeException( 'No text in ' . $this->label . ' API response' );
@@ -287,7 +290,9 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
 		if ( strlen( $text ) > self::MAX_OUTPUT_BYTES ) {
 			throw new RuntimeException( 'Provider output exceeds the local storage safety limit.' );
 		}
-        return $this->clean_output( $text );
+		$text = $this->clean_output( $text );
+        if ( trim( $text ) === '' ) throw new RuntimeException( 'No text in ' . $this->label . ' API response' );
+        return $text;
     }
 
     private function build_system_instruction( $source_lang, $target_lang, $type = 'text' ) {

@@ -25,7 +25,7 @@ $render = new ReflectionMethod( $admin, 'render_translations_tab' );
 $render->setAccessible( true );
 $generation = GML_Page_Cache::generation();
 foreach ( [ 'clear_all_cache', 'clear_lang_cache' ] as $action ) {
-    $_POST = [ 'gml_cache_action' => $action, 'lang_code' => 'de' ];
+    $_POST = [ 'gml_cache_action' => $action, 'lang_code' => 'de', 'gml_cache_confirmation' => 'REFRESH' ];
     $_REQUEST = [ 'gml_cache_nonce' => wp_create_nonce( 'gml_cache_action' ) ];
     ob_start();
     $render->invoke( $admin );

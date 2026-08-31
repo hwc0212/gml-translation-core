@@ -510,7 +510,7 @@ abstract class GML_Translation_Queue_Processor {
         if ( in_array( $code, [
             'provider_not_configured', 'unsafe_endpoint', 'network_error', 'bad_request',
             'authentication_error', 'not_found', 'rate_limited', 'provider_unavailable',
-            'invalid_json', 'timeout',
+            'invalid_json', 'timeout', 'empty_response', 'incomplete_response',
         ], true ) ) {
             return true;
         }

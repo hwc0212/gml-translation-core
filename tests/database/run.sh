@@ -17,6 +17,9 @@ done
 for pid in "${pids[@]}"; do wait "$pid"; done
 php "$ROOT/enqueue.php" verify
 php "$ROOT/controls.php"
+php "$ROOT/cache-confirmation.php"
+php "$ROOT/gemini-response.php"
+php "$ROOT/seo-connection.php"
 php "$ROOT/sample-resume.php"
 php "$ROOT/sample-schedule.php"
 php "$ROOT/queue-scopes.php"

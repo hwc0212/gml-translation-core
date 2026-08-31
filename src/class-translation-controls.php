@@ -13,7 +13,7 @@ class GML_Translation_Controls {
             if ( ! in_array( $action, [ 'clear_all_cache', 'clear_lang_cache', 'refresh_page_cache' ], true ) ) {
                 return new WP_Error( 'removed_action', 'This cache action is no longer available. No translations or queue items were deleted.' );
             }
-            return self::refresh_cache();
+            return self::refresh_cache( $post['gml_cache_confirmation'] ?? '' );
         }
         if ( isset( $post['gml_global_action'] ) || isset( $post['gml_lang_action'] ) ) {
             check_admin_referer( 'gml_translation_action', 'gml_translation_nonce' );
@@ -134,8 +134,9 @@ class GML_Translation_Controls {
         return new WP_Error( 'invalid_language', 'Choose a configured language.' );
     }
 
-    public static function refresh_cache() {
+    public static function refresh_cache( $confirmation = '' ) {
         if ( ! current_user_can( 'manage_options' ) ) return new WP_Error( 'forbidden', 'Unauthorized' );
+        if ( ! is_string( $confirmation ) || ! hash_equals( 'REFRESH', trim( $confirmation ) ) ) return new WP_Error( 'confirmation_required', 'Type REFRESH to confirm page cache refresh. No changes were made.' );
         GML_Page_Cache::invalidate();
         return true;
     }
