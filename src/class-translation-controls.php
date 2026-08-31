@@ -1,6 +1,7 @@
 <?php
 /** Shared administration commands; scanning never controls the AI worker. */
 if ( ! defined( 'ABSPATH' ) ) exit;
+require_once __DIR__ . '/class-translation-queue-scope.php';
 
 class GML_Translation_Controls {
     public static function handle_request( array $post ) {
@@ -22,6 +23,7 @@ class GML_Translation_Controls {
             if ( in_array( $action, [ 'start_all', 'start_lang' ], true ) ) return self::start( $lang );
             if ( in_array( $action, [ 'pause_all', 'pause_lang' ], true ) ) return self::pause( $lang );
             if ( $action === 'resume_sample' ) return self::resume_sample();
+            if ( $action === 'pause_sample' ) return self::pause_sample();
             return new WP_Error( 'invalid_action', 'Invalid translation action.' );
         }
         return null;
@@ -35,10 +37,11 @@ class GML_Translation_Controls {
         if ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() ) {
             return new WP_Error( 'safety_pause', 'Translation is safety-paused. Test the saved AI connection and retry a limited language sample first.' );
         }
-        if ( get_option( GML_Queue_Processor::SAMPLE_OPTION, [] ) ) return new WP_Error( 'sample_running', 'A limited translation sample is active. Resume that sample before starting other work.' );
         $languages = (array) get_option( 'gml_languages', [] );
         $found = false;
+        $isolated_start = get_option( 'gml_translation_paused', false ) || ! GML_Translation_Queue_Scope::normal_enabled();
         foreach ( $languages as &$language ) {
+            if ( $lang !== '' && $isolated_start ) $language['paused'] = true;
             if ( ( ! isset( $language['enabled'] ) || $language['enabled'] ) && ( $lang === '' || ( $language['code'] ?? '' ) === $lang ) ) {
                 $language['paused'] = false;
                 $found = true;
@@ -46,10 +49,9 @@ class GML_Translation_Controls {
         }
         unset( $language );
         if ( ! $found ) return new WP_Error( 'invalid_language', 'Choose a configured language.' );
-        if ( ! wp_next_scheduled( GML_Queue_Processor::CRON_HOOK ) ) {
-            $scheduled = wp_schedule_single_event( time() + 5, GML_Queue_Processor::CRON_HOOK, [], true );
-            if ( ! $scheduled || is_wp_error( $scheduled ) ) return new WP_Error( 'schedule_failed', 'WordPress could not schedule translation. Pause settings were kept.' );
-        }
+        if ( ! GML_Queue_Processor::ensure_scheduled() ) return new WP_Error( 'schedule_failed', 'WordPress could not schedule translation. Pause settings were kept.' );
+        update_option( GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION, (int) GML_Translation_Queue_Scope::sample_paused(), false );
+        update_option( GML_Translation_Queue_Scope::NORMAL_OPTION, 1, false );
         update_option( 'gml_languages', $languages );
         update_option( 'gml_translation_paused', false, false );
         return true;
@@ -58,7 +60,7 @@ class GML_Translation_Controls {
     /** Read at most one approved sample; never scan the full translation queue. */
     public static function sample_status() {
         $raw = (array) get_option( GML_Queue_Processor::SAMPLE_OPTION, [] );
-        $state = [ 'active' => ! empty( $raw ), 'valid' => false, 'total' => count( $raw ), 'remaining' => 0, 'language' => '', 'paused' => (bool) get_option( 'gml_translation_paused', false ) ];
+        $state = [ 'active' => ! empty( $raw ), 'valid' => false, 'total' => count( $raw ), 'remaining' => 0, 'language' => '', 'paused' => GML_Translation_Queue_Scope::sample_paused() ];
         if ( ! $raw || count( $raw ) > GML_Queue_Processor::RETRY_LIMIT ) return $state;
         $ids = array_values( array_unique( array_filter( array_map( 'intval', $raw ), static function( $id ) { return $id > 0; } ) ) );
         if ( count( $ids ) !== count( $raw ) ) return $state;
@@ -71,7 +73,6 @@ class GML_Translation_Controls {
         foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
             if ( ( $language['code'] ?? '' ) === $state['language'] && ( ! isset( $language['enabled'] ) || $language['enabled'] ) ) {
                 $state['valid'] = true;
-                $state['paused'] = $state['paused'] || ! empty( $language['paused'] );
             }
         }
         foreach ( $rows as $row ) {
@@ -95,27 +96,28 @@ class GML_Translation_Controls {
             return new WP_Error( 'sample_busy', 'The current translation batch is still finishing. Try again after it stops.' );
         }
         if ( ! $sample['remaining'] ) {
-            delete_option( GML_Queue_Processor::SAMPLE_OPTION );
-            return self::pause();
+            GML_Translation_Queue_Scope::finish_sample();
+            return true;
         }
-        if ( ! wp_next_scheduled( GML_Queue_Processor::CRON_HOOK ) ) {
-            $scheduled = wp_schedule_single_event( time() + 5, GML_Queue_Processor::CRON_HOOK, [], true );
-            if ( ! $scheduled || is_wp_error( $scheduled ) ) return new WP_Error( 'schedule_failed', 'WordPress could not schedule translation. Pause settings were kept.' );
-        }
-        // Retain the same IDs and attempt counters; only resume their language.
-        $languages = (array) get_option( 'gml_languages', [] );
-        foreach ( $languages as &$language ) {
-            if ( ( $language['code'] ?? '' ) === $sample['language'] ) $language['paused'] = false;
-        }
-        unset( $language );
-        update_option( 'gml_languages', $languages );
+        if ( ! GML_Queue_Processor::ensure_scheduled() ) return new WP_Error( 'schedule_failed', 'WordPress could not schedule translation. Pause settings were kept.' );
+        // Resuming a sample never implicitly resumes ordinary pending work.
+        update_option( GML_Translation_Queue_Scope::NORMAL_OPTION, (int) ( ! get_option( 'gml_translation_paused', false ) && GML_Translation_Queue_Scope::normal_enabled() ), false );
+        update_option( GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION, 0, false );
         update_option( 'gml_translation_paused', false, false );
+        return true;
+    }
+
+    public static function pause_sample() {
+        if ( ! current_user_can( 'manage_options' ) ) return new WP_Error( 'forbidden', 'Unauthorized' );
+        update_option( GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION, 1, false );
+        if ( ! GML_Translation_Queue_Scope::has_work_scope() ) GML_Queue_Processor::unschedule_cron();
         return true;
     }
 
     public static function pause( $lang = '' ) {
         if ( ! current_user_can( 'manage_options' ) ) return new WP_Error( 'forbidden', 'Unauthorized' );
         if ( $lang === '' ) {
+            update_option( GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION, 1, false );
             update_option( 'gml_translation_paused', true, false );
             GML_Queue_Processor::unschedule_cron();
             return true;
@@ -125,6 +127,7 @@ class GML_Translation_Controls {
             if ( ( $language['code'] ?? '' ) === $lang ) {
                 $language['paused'] = true;
                 update_option( 'gml_languages', $languages );
+                if ( ! GML_Translation_Queue_Scope::has_work_scope() ) GML_Queue_Processor::unschedule_cron();
                 return true;
             }
         }
@@ -147,18 +150,13 @@ class GML_Translation_Controls {
         $last = (array) get_option( 'gml_translation_last_batch', [] );
         $next = wp_next_scheduled( GML_Queue_Processor::CRON_HOOK );
         $paused = (bool) get_option( 'gml_translation_paused', false );
-        if ( $lang === '' ) {
-            $runnable = false;
-            foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
-                if ( empty( $language['paused'] ) && ( ! isset( $language['enabled'] ) || $language['enabled'] ) ) $runnable = true;
-            }
-            if ( ! $runnable ) $paused = true;
+        $normal = GML_Translation_Queue_Scope::normal_languages();
+        $runnable = $lang === '' ? ! empty( $normal ) : in_array( $lang, $normal, true );
+        if ( $lang === '' && ! $runnable ) {
+            $sample = self::sample_status();
+            $runnable = $sample['valid'] && ! $sample['paused'] && $sample['remaining'] > 0;
         }
-        if ( $lang !== '' ) {
-            foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
-                if ( ( $language['code'] ?? '' ) === $lang && ( ! empty( $language['paused'] ) || isset( $language['enabled'] ) && ! $language['enabled'] ) ) $paused = true;
-            }
-        }
+        if ( ! $runnable ) $paused = true;
         $active = (int) ( $lock['expires'] ?? 0 ) > time() && ! empty( $lock['token'] )
             && ( $lang === '' || ( $last['language'] ?? '' ) === $lang )
             && ( $last['token'] ?? '' ) === ( $lock['token'] ?? '' );

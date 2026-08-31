@@ -35,7 +35,28 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
-## 0.4.7 Paused Sample Recovery
+## 0.4.8 Independent Queue Controls
+
+Normal pending work and approved failed-item samples have separate controls.
+Start All selects every enabled normal language, while language actions affect
+only their own normal scope. Paused sample IDs stay excluded from normal work.
+Sample completion cannot stop explicitly started normal work. Global pause
+stops both scopes; resuming one scope never implicitly resumes the other.
+
+The optional gml_translation_normal_queue_enabled and
+gml_translation_retry_sample_paused flags preserve legacy sample-only defaults
+without an upgrade migration or automatic scope expansion. Explicit zero/one
+values avoid WordPress treating a missing false-valued option as unchanged.
+Existing tables, translations, URLs and all historical failed rows are retained.
+Pause all work before rolling back files to a version without these controls.
+
+Starts install a recurring every_minute event, replacing legacy one-off events.
+The worker retains one provider batch per tick, language rotation, locking,
+provider-wide circuit breaking and a maximum 25-row failure retry sample.
+Content scanning no longer depends on sample state and never resumes a queue.
+No new frontend scans, network requests or migrations are introduced.
+
+## 0.4.7 Paused Sample Recovery (Historical)
 
 An approved retry sample now has its own explicit Resume Sample command.
 Pausing it no longer leaves every start control disabled. Resume validates

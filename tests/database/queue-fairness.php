@@ -11,6 +11,8 @@ delete_option( 'gml_translation_last_batch' );
 delete_option( 'gml_translation_circuit_breaker' );
 delete_option( 'gml_translation_process_lock' );
 delete_option( 'gml_translation_retry_sample_ids' );
+delete_option( 'gml_translation_normal_queue_enabled' );
+delete_option( 'gml_translation_retry_sample_paused' );
 update_option( 'gml_translation_failure_ack', (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}gml_queue WHERE status = 'failed'" ) );
 if ( class_exists( 'GML_SEO' ) ) {
     update_option( 'gml_seo', [ 'engine' => 'gemini', 'gemini_key' => 'synthetic-fairness-test-only', 'module_ai_translation_enabled' => 1 ] );
@@ -19,7 +21,7 @@ if ( class_exists( 'GML_SEO' ) ) {
     $cache->setValue( null, null );
 }
 $table = $wpdb->prefix . 'gml_queue';
-// Isolate pending work using the existing bounded sample mechanism, without deleting old rows.
+// Legacy seed rows use German; these enabled languages isolate normal worker fairness.
 $ids = [];
 foreach ( [ 'es', 'ru' ] as $lang ) {
     for ( $i = 0; $i < 35; $i++ ) {
@@ -28,7 +30,6 @@ foreach ( [ 'es', 'ru' ] as $lang ) {
         $ids[] = (int) $wpdb->insert_id;
     }
 }
-update_option( 'gml_translation_retry_sample_ids', $ids );
 class GML_Fairness_Worker extends GML_Queue_Processor {
     public static $languages = [];
     protected function create_api() {

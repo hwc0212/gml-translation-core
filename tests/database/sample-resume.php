@@ -17,6 +17,8 @@ update_option( 'gml_languages', [ [ 'code' => 'es', 'enabled' => true, 'paused' 
 delete_option( 'gml_translation_circuit_breaker' );
 delete_option( 'gml_translation_process_lock' );
 delete_option( 'gml_translation_retry_sample_ids' );
+delete_option( 'gml_translation_normal_queue_enabled' );
+delete_option( 'gml_translation_retry_sample_paused' );
 wp_clear_scheduled_hook( 'gml_process_queue' );
 if ( class_exists( 'GML_SEO' ) ) {
     update_option( 'gml_seo', [ 'engine' => 'gemini', 'gemini_key' => 'synthetic-resume-test-only', 'module_ai_translation_enabled' => 1 ] );
@@ -48,8 +50,8 @@ $dom = new DOMDocument();
 @$dom->loadHTML( $html );
 $xpath = new DOMXPath( $dom );
 gml_db_assert( $xpath->query( '//button[@value="resume_sample" and not(@disabled)]' )->length > 0, 'paused sample exposes an enabled Resume Sample command' );
-gml_db_assert( $xpath->query( '//button[@id="gml-crawl-start" and @disabled]' )->length === 1, 'content scan remains blocked during a limited sample' );
-gml_db_assert( is_wp_error( GML_Translation_Controls::start() ), 'full queue start still cannot bypass sample scope' );
+gml_db_assert( $xpath->query( '//button[@id="gml-crawl-start" and not(@disabled)]' )->length === 1, 'content scan is independent of a limited sample' );
+gml_db_assert( $xpath->query( '//button[@value="start_all" and not(@disabled)]' )->length === 1 && $xpath->query( '//button[@value="start_lang" and not(@disabled)]' )->length === 2, 'global and per-language normal controls remain available with a sample' );
 
 $reject = static function() { return false; };
 add_filter( 'pre_schedule_event', $reject );
@@ -100,7 +102,7 @@ GML_Translation_Controls::pause( 'es' );
 $_REQUEST = [ 'gml_translation_nonce' => wp_create_nonce( 'gml_translation_action' ) ];
 gml_db_assert( GML_Translation_Controls::handle_request( [ 'gml_global_action' => 'resume_sample' ] ) === true, 'nonce-protected sample resume succeeds after global and language pause' );
 $languages = get_option( 'gml_languages' );
-gml_db_assert( ! get_option( 'gml_translation_paused' ) && ! $languages[0]['paused'] && $languages[1]['paused'], 'resume enables only the selected sample language and preserves other pauses' );
+gml_db_assert( ! get_option( 'gml_translation_paused' ) && $languages[0]['paused'] && $languages[1]['paused'], 'sample resume preserves ordinary language pauses' );
 gml_db_assert( get_option( 'gml_translation_retry_sample_ids' ) === $sample && wp_next_scheduled( 'gml_process_queue' ), 'resume keeps sample scope and schedules before unpausing' );
 class GML_Sample_Worker extends GML_Queue_Processor {
     const BATCH_SIZE = 10;

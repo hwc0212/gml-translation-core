@@ -9,6 +9,8 @@ update_option( 'gml_languages', [ [ 'code' => 'de', 'enabled' => true, 'paused' 
 update_option( 'gml_translation_paused', true );
 delete_option( 'gml_translation_circuit_breaker' );
 delete_option( 'gml_translation_retry_sample_ids' );
+delete_option( 'gml_translation_normal_queue_enabled' );
+delete_option( 'gml_translation_retry_sample_paused' );
 if ( class_exists( 'GML_SEO' ) ) {
     update_option( 'gml_seo', [ 'engine' => 'gemini', 'gemini_key' => 'test-only-never-sent', 'module_ai_translation_enabled' => 1 ] );
     $cache = new ReflectionProperty( GML_SEO::class, 'opt_cache' );
@@ -44,7 +46,7 @@ $start = GML_Translation_Controls::start();
 remove_filter( 'pre_schedule_event', $reject );
 gml_db_assert( is_wp_error( $start ) && get_option( 'gml_translation_paused' ), 'queue schedule failure preserves ordinary pause' );
 update_option( 'gml_translation_retry_sample_ids', [ 1 ] );
-gml_db_assert( is_wp_error( GML_Translation_Controls::start() ), 'full start cannot bypass an active retry sample' );
+gml_db_assert( GML_Translation_Controls::start() === true && get_option( 'gml_translation_retry_sample_ids' ) === [ 1 ], 'full pending start preserves isolated sample scope' );
 delete_option( 'gml_translation_retry_sample_ids' );
 gml_db_assert( GML_Translation_Controls::start() === true, 'explicit queue start succeeds' );
 gml_db_assert( GML_Translation_Controls::queue_status()['state'] === 'scheduled', 'scheduled queue is not reported as actively processing' );

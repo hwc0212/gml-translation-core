@@ -12,6 +12,7 @@
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
+require_once __DIR__ . '/class-translation-queue-scope.php';
 
 abstract class GML_Translation_Queue_Processor {
 
@@ -29,12 +30,12 @@ abstract class GML_Translation_Queue_Processor {
 	const MAX_BATCH_INPUT_BYTES = 131072;
 
     public function __construct() {
-        add_filter( 'cron_schedules', [ $this, 'add_cron_interval' ] );
+        add_filter( 'cron_schedules', [ static::class, 'add_cron_interval' ] );
         add_action( static::CRON_HOOK, [ $this, 'process_batch' ] );
         add_action( 'wp_loaded', [ $this, 'maybe_schedule_cron' ] );
     }
 
-    public function add_cron_interval( $schedules ) {
+    public static function add_cron_interval( $schedules ) {
         if ( ! isset( $schedules['every_minute'] ) ) {
             $schedules['every_minute'] = [
                 'interval' => 60,
@@ -51,6 +52,7 @@ abstract class GML_Translation_Queue_Processor {
         if (
             ! $this->translation_work_enabled() ||
             ! $this->ai_translation_available() ||
+            ! GML_Translation_Queue_Scope::has_work_scope() ||
             static::circuit_is_open() ||
             static::maybe_open_for_existing_failures()
         ) {
@@ -58,8 +60,19 @@ abstract class GML_Translation_Queue_Processor {
             return;
         }
         if ( ! wp_next_scheduled( static::CRON_HOOK ) ) {
-            wp_schedule_event( time(), 'every_minute', static::CRON_HOOK );
+            static::ensure_scheduled();
         }
+    }
+
+    public static function ensure_scheduled() {
+        $event = wp_get_scheduled_event( static::CRON_HOOK );
+        if ( $event && $event->schedule === 'every_minute' ) return true;
+        add_filter( 'cron_schedules', [ static::class, 'add_cron_interval' ] );
+        $when = time() + 5;
+        $result = wp_schedule_event( $when, 'every_minute', static::CRON_HOOK, [], true );
+        if ( ! $result || is_wp_error( $result ) ) return false;
+        if ( $event && $event->timestamp !== $when ) wp_unschedule_event( $event->timestamp, static::CRON_HOOK );
+        return true;
     }
 
     public static function unschedule_cron() {
@@ -100,6 +113,11 @@ abstract class GML_Translation_Queue_Processor {
         global $wpdb;
         $queue_table = $wpdb->prefix . 'gml_queue';
         $sample_ids  = static::sample_ids();
+        if ( get_option( static::SAMPLE_OPTION, [] ) && ! $sample_ids ) return;
+        if ( ! GML_Translation_Queue_Scope::has_work_scope() ) {
+            static::unschedule_cron();
+            return;
+        }
         $lock_token  = static::acquire_process_lock();
         if ( $lock_token === '' ) {
             return;
@@ -110,23 +128,25 @@ abstract class GML_Translation_Queue_Processor {
             // A new lock may only be acquired after the previous lock expired.
             $wpdb->query( "UPDATE $queue_table SET status = 'pending' WHERE status = 'processing'" );
 
-            $paused_languages = [];
-            foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
-                if ( ! empty( $language['paused'] ) && ! empty( $language['code'] ) ) {
-                    $paused_languages[] = sanitize_key( $language['code'] );
-                }
+            $normal_languages = GML_Translation_Queue_Scope::normal_languages();
+            $enabled_languages = GML_Translation_Queue_Scope::enabled_languages();
+            $scopes = [];
+            if ( $normal_languages ) {
+                $placeholders = implode( ',', array_fill( 0, count( $normal_languages ), '%s' ) );
+                $normal_sql = $wpdb->prepare( "target_lang IN ($placeholders)", $normal_languages );
+                if ( $sample_ids ) $normal_sql .= ' AND id NOT IN (' . implode( ',', $sample_ids ) . ')';
+                $scopes[] = '(' . $normal_sql . ')';
             }
-
-            $exclude_sql = '';
-            if ( ! empty( $paused_languages ) ) {
-                $placeholders = implode( ',', array_fill( 0, count( $paused_languages ), '%s' ) );
-                $exclude_sql  = $wpdb->prepare( " AND target_lang NOT IN ($placeholders)", $paused_languages );
+            if ( $sample_ids && ! GML_Translation_Queue_Scope::sample_paused() && $enabled_languages ) {
+                $placeholders = implode( ',', array_fill( 0, count( $enabled_languages ), '%s' ) );
+                $scopes[] = '(' . $wpdb->prepare( "target_lang IN ($placeholders)", $enabled_languages ) . ' AND id IN (' . implode( ',', $sample_ids ) . '))';
             }
-            $sample_sql = $sample_ids ? ' AND id IN (' . implode( ',', $sample_ids ) . ')' : '';
+            if ( ! $scopes ) return;
+            $scope_sql = ' AND (' . implode( ' OR ', $scopes ) . ')';
             $limit      = (int) static::BATCH_SIZE;
             $query      = "SELECT * FROM $queue_table
                  WHERE status = 'pending' AND attempts < 3
-                 $exclude_sql $sample_sql";
+                 $scope_sql";
             $order      = " ORDER BY target_lang ASC, context_type ASC, priority DESC, created_at ASC, id ASC LIMIT $limit";
             $last_batch = get_option( 'gml_translation_last_batch', [] );
             $last_lang  = is_array( $last_batch ) ? sanitize_key( $last_batch['language'] ?? '' ) : '';
@@ -139,7 +159,7 @@ abstract class GML_Translation_Queue_Processor {
             }
 
             if ( empty( $items ) ) {
-                if ( $sample_ids ) {
+                if ( $sample_ids && ! (int) $wpdb->get_var( "SELECT COUNT(*) FROM $queue_table WHERE status IN ('pending','processing') AND attempts < 3 AND id IN (" . implode( ',', $sample_ids ) . ')' ) ) {
                     static::complete_sample_mode();
                 }
                 return;
@@ -194,9 +214,8 @@ abstract class GML_Translation_Queue_Processor {
                 if ( static::is_provider_wide_failure( $exception->getMessage(), $api ) ) {
                     if ( $sample_ids ) {
                         $this->restore_sample_as_failed( $wpdb, $queue_table, $sample_ids, $exception->getMessage() );
-                    } else {
-                        $this->release_processing_items( $wpdb, $queue_table, $ids );
                     }
+                    $this->release_processing_items( $wpdb, $queue_table, $ids );
                     static::open_circuit( $exception->getMessage(), [
                         'engine' => method_exists( $api, 'get_engine' ) ? $api->get_engine() : '',
                         'model'  => method_exists( $api, 'get_model' ) ? $api->get_model() : '',
@@ -216,6 +235,7 @@ abstract class GML_Translation_Queue_Processor {
                         $saved  = $this->save_translation_result( $wpdb, $queue_table, $item, $single[0] ?? null, $translator, $parser ) || $saved;
                     } catch ( Throwable $single_exception ) {
                         if ( static::is_provider_wide_failure( $single_exception->getMessage(), $api ) ) {
+                            if ( $sample_ids ) $this->restore_sample_as_failed( $wpdb, $queue_table, $sample_ids, $single_exception->getMessage() );
                             $this->release_processing_items( $wpdb, $queue_table, $ids );
                             static::open_circuit( $single_exception->getMessage(), [
                                 'engine' => method_exists( $api, 'get_engine' ) ? $api->get_engine() : '',
@@ -265,6 +285,8 @@ abstract class GML_Translation_Queue_Processor {
                 update_option( 'gml_translation_last_batch', $activity, false );
             }
             static::release_process_lock( $lock_token );
+            // Replace legacy single events after a batch, without waking a paused queue.
+            if ( $this->translation_work_enabled() && GML_Translation_Queue_Scope::has_work_scope() && ! static::circuit_is_open() ) static::ensure_scheduled();
         }
     }
 
@@ -276,7 +298,10 @@ abstract class GML_Translation_Queue_Processor {
     }
 
     private static function sample_ids() {
-        return array_values( array_filter( array_map( 'intval', (array) get_option( static::SAMPLE_OPTION, [] ) ) ) );
+        $raw = (array) get_option( static::SAMPLE_OPTION, [] );
+        if ( count( $raw ) > static::RETRY_LIMIT ) return [];
+        $ids = array_values( array_unique( array_filter( array_map( 'intval', $raw ), static function( $id ) { return $id > 0; } ) ) );
+        return count( $ids ) === count( $raw ) ? $ids : [];
     }
 
     protected static function acquire_process_lock() {
@@ -398,7 +423,7 @@ abstract class GML_Translation_Queue_Processor {
     }
 
     public static function retry_failed( $lang = '', $limit = null ) {
-        if ( static::circuit_is_open() || $lang === '' || static::sample_ids() ) {
+        if ( static::circuit_is_open() || $lang === '' || get_option( static::SAMPLE_OPTION, [] ) || ! in_array( $lang, GML_Translation_Queue_Scope::enabled_languages(), true ) ) {
             return 0;
         }
         global $wpdb;
@@ -419,15 +444,15 @@ abstract class GML_Translation_Queue_Processor {
         );
         if ( ! $updated ) return 0;
 
+        update_option( GML_Translation_Queue_Scope::NORMAL_OPTION, (int) ( ! get_option( 'gml_translation_paused', false ) && GML_Translation_Queue_Scope::normal_enabled() ), false );
+        update_option( GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION, 1, false );
         update_option( static::SAMPLE_OPTION, $ids, false );
         static::clear_readiness_cache();
         return (int) $updated;
     }
 
     private static function complete_sample_mode() {
-        delete_option( static::SAMPLE_OPTION );
-        update_option( 'gml_translation_paused', true, false );
-        static::unschedule_cron();
+        GML_Translation_Queue_Scope::finish_sample();
     }
 
     public static function circuit_is_open() {
@@ -447,7 +472,8 @@ abstract class GML_Translation_Queue_Processor {
             'model'     => sanitize_text_field( $context['model'] ?? '' ),
         ], false );
         update_option( 'gml_translation_paused', true, false );
-        delete_option( static::SAMPLE_OPTION );
+        // Keep the retry IDs isolated after an error; normal Start All must not absorb them.
+        update_option( GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION, 1, false );
         static::clear_readiness_cache();
         static::unschedule_cron();
     }

@@ -67,9 +67,6 @@ class GML_Translation_Content_Crawler {
 		if ( class_exists( 'GML_Queue_Processor' ) && ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() ) ) {
 			return new WP_Error( 'gml_safety_pause', 'Translation is safety-paused. Test the saved AI connection and retry one limited language sample first.' );
 		}
-		if ( get_option( 'gml_translation_retry_sample_ids', [] ) ) {
-			return new WP_Error( 'gml_sample_running', 'A limited translation sample is still running. Wait for it to finish before starting a full crawl.' );
-		}
 
 		$total = static::count_crawlable_content();
 		// Paused workers have no instance, so register the schedule on this entrypoint.
@@ -101,7 +98,7 @@ class GML_Translation_Content_Crawler {
 		$total   = max( 0, (int) get_option( 'gml_crawl_total', 0 ) );
 		$next = wp_next_scheduled( static::CRON_HOOK );
 		if ( ! $running ) $state = get_option( 'gml_crawl_completed', false ) ? 'completed' : 'stopped';
-		elseif ( ! static::ai_translation_available() || GML_Queue_Processor::circuit_is_open() || get_option( 'gml_translation_retry_sample_ids', [] ) ) $state = 'blocked';
+		elseif ( ! static::ai_translation_available() || GML_Queue_Processor::circuit_is_open() ) $state = 'blocked';
 		elseif ( (int) get_option( static::LOCK_OPTION, 0 ) > time() ) $state = 'scanning';
 		elseif ( ! $next ) $state = 'not_scheduled';
 		elseif ( $next < time() - 120 ) $state = 'overdue';
@@ -336,9 +333,6 @@ class GML_Translation_Content_Crawler {
 	}
 
 	protected static function safety_paused() {
-		if ( get_option( 'gml_translation_retry_sample_ids', [] ) ) {
-			return true;
-		}
 		return class_exists( 'GML_Queue_Processor' )
 			&& ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() );
 	}

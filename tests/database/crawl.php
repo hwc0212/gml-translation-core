@@ -43,7 +43,7 @@ try { (new GML_Translation_Editor())->ajax_crawl_action(); }
 catch ( GML_Test_Json_Done $done ) {}
 $raw = ob_get_clean();
 $response = json_decode( $raw, true );
-if ( in_array( $case, [ 'resume', 'queue-schedule' ], true ) ) {
+if ( in_array( $case, [ 'resume', 'queue-schedule', 'sample' ], true ) ) {
     gml_db_assert( ! empty( $response['success'] ), 'real AJAX starts an independent scan from an ordinary pause' );
     gml_db_assert( get_option( 'gml_translation_paused' ) && get_option( 'gml_crawl_running' ), 'successful scan start leaves translation paused' );
     gml_db_assert( wp_next_scheduled( 'gml_crawl_content' ) && ! wp_next_scheduled( 'gml_process_queue' ), 'scan schedules only its own task, even when the queue scheduler is unavailable' );

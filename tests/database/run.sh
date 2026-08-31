@@ -19,6 +19,7 @@ php "$ROOT/enqueue.php" verify
 php "$ROOT/controls.php"
 php "$ROOT/sample-resume.php"
 php "$ROOT/sample-schedule.php"
+php "$ROOT/queue-scopes.php"
 php "$ROOT/technical-text.php"
 php "$ROOT/credentials.php"
 php "$ROOT/credentials-admin.php"
