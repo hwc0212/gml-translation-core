@@ -7,6 +7,7 @@ test "${GML_DATABASE_TESTS:-}" = 1
 php "$ROOT/upgrade.php"
 php "$ROOT/request-context.php" ajax
 php "$ROOT/request-context.php" cron
+php "$ROOT/scan-context.php"
 php "$ROOT/enqueue.php" prepare
 pids=()
 for i in {1..8}; do
@@ -15,6 +16,8 @@ for i in {1..8}; do
 done
 for pid in "${pids[@]}"; do wait "$pid"; done
 php "$ROOT/enqueue.php" verify
+php "$ROOT/controls.php"
+php "$ROOT/technical-text.php"
 for scenario in resume breaker sample schedule queue-schedule no-key unauthorized nonce; do
     php "$ROOT/crawl.php" "$scenario"
 done

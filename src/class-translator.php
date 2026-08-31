@@ -17,6 +17,15 @@ class GML_Translation_Translator {
 	private static $dict_loaded   = [];
 
     public function translate( $parsed, $target_lang ) {
+        return $this->translate_nodes( $parsed, $target_lang, false );
+    }
+
+    /** Discovery queues text but never changes the AI worker pause state. */
+    public function discover( $parsed, $target_lang ) {
+        return $this->translate_nodes( $parsed, $target_lang, true );
+    }
+
+    private function translate_nodes( $parsed, $target_lang, $discovery ) {
         global $wpdb;
         $source_lang  = sanitize_key( get_option( 'gml_source_lang', 'en' ) );
         $target_lang  = sanitize_key( $target_lang );
@@ -50,7 +59,7 @@ class GML_Translation_Translator {
         }
 
         if ( $uncached && $this->ai_translation_available()
-            && ! get_option( 'gml_translation_paused', false )
+            && ( ! get_option( 'gml_translation_paused', false ) || $discovery )
             && ! is_array( get_option( 'gml_translation_circuit_breaker', false ) ) ) {
             $this->enqueue_missing( $uncached, $source_lang, $target_lang );
         }

@@ -14,6 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 require_once __DIR__ . '/interface-translation-ai-provider.php';
 require_once __DIR__ . '/class-ai-http-transport.php';
+require_once __DIR__ . '/class-translation-text.php';
 
 class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface {
 
@@ -335,9 +336,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         if ( strpos( $text, '<' ) !== false ) {
             $text = trim( wp_strip_all_tags( $text ) );
         }
-        $text = preg_replace( '/^\*{1,2}[^*]+:\*{1,2}\s*/', '', $text );
-        $text = preg_replace( '/\*{1,2}([^*]+)\*{1,2}/', '$1', $text );
-        $text = preg_replace( '/__([^_]+)__/', '$1', $text );
+        $text = GML_Translation_Text::clean_markdown_wrappers( $text );
         return trim( $text );
     }
 

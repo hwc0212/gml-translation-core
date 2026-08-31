@@ -179,6 +179,8 @@ abstract class GML_Translation_Queue_Processor {
             $source     = (string) $first->source_lang;
             $target     = (string) $first->target_lang;
             $saved      = false;
+            $activity = [ 'token' => $lock_token, 'started' => time(), 'language' => $target ];
+            update_option( 'gml_translation_last_batch', $activity, false );
 
             try {
                 $translated = $api->translate_batch( $texts, $source, $target, $first_type );
@@ -252,6 +254,10 @@ abstract class GML_Translation_Queue_Processor {
                 }
             }
         } finally {
+            if ( isset( $activity ) ) {
+                $activity['finished'] = time();
+                update_option( 'gml_translation_last_batch', $activity, false );
+            }
             static::release_process_lock( $lock_token );
         }
     }

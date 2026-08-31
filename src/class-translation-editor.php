@@ -220,7 +220,7 @@ class GML_Translation_Editor_Core {
             if ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() ) {
                 wp_send_json_error( __( 'Translation is safety-paused. Test the saved AI connection and retry one limited language sample first.', static::TEXT_DOMAIN ) );
             }
-            $started = GML_Content_Crawler::start_crawl( true );
+            $started = GML_Content_Crawler::start_crawl();
             if ( is_wp_error( $started ) ) {
                 wp_send_json_error( $started->get_error_message() );
             }
@@ -228,17 +228,7 @@ class GML_Translation_Editor_Core {
                 wp_send_json_error( __( 'WordPress could not schedule the content crawl. The translation queue remains unchanged.', static::TEXT_DOMAIN ) );
             }
 
-            // Resume the AI worker without changing multilingual site output.
-            update_option( 'gml_translation_paused', false );
-
-            // Un-pause all languages
-            $langs = get_option( 'gml_languages', [] );
-            foreach ( $langs as &$l ) {
-                $l['paused'] = false;
-            }
-            update_option( 'gml_languages', $langs );
-
-            wp_send_json_success( [ 'message' => __( 'Content crawl started.', static::TEXT_DOMAIN ) ] );
+            wp_send_json_success( [ 'message' => __( 'Content scan scheduled. Translation settings were kept.', static::TEXT_DOMAIN ) ] );
         } elseif ( $action === 'stop' ) {
             GML_Content_Crawler::stop_crawl();
             wp_send_json_success( [ 'message' => __( 'Content crawl stopped.', static::TEXT_DOMAIN ) ] );
@@ -256,7 +246,11 @@ class GML_Translation_Editor_Core {
             wp_send_json_error( 'Unauthorized' );
         }
 
-        wp_send_json_success( GML_Content_Crawler::get_status() );
+        $status = GML_Content_Crawler::get_status();
+        $status['queue'] = GML_Translation_Controls::queue_status();
+        $last = $status['queue']['last_activity'];
+        $status['queue']['last_activity_label'] = $last ? wp_date( 'Y-m-d H:i:s', $last ) : __( 'Not recorded yet', static::TEXT_DOMAIN );
+        wp_send_json_success( $status );
     }
 
     protected function ai_translation_available() {

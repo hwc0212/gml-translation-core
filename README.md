@@ -35,6 +35,23 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.4.4 Controls And Technical Text
+
+Content discovery and AI work are independent. A scan can enqueue missing text
+while AI is ordinarily paused, but never resumes the worker or invokes a paid
+provider itself. Existing running workers keep their existing state. Credential,
+multilingual, circuit-breaker and bounded-sample guards remain in force.
+
+Shared administration controls check capabilities and nonces, schedule before
+resuming AI, and expose actual batch activity rather than equating unpaused with
+Running. Legacy cache commands now invalidate rendered pages only; translation
+memory, manual edits and queue rows survive. Unsupported queue deletion is rejected.
+
+Technical-safe wrapper cleanup preserves dimensions such as `90*45*30mm`,
+operators and SKU symbols in provider output, visible text, titles and attributes.
+This does not reconstruct already-corrupted saved translations or translate new
+website content. Those require review and bounded follow-up, not a database reset.
+
 ## 0.4.3 Upgrade Safety
 
 The 0.4.2 installer could perform an unbounded queue self-join DELETE and
@@ -55,10 +72,9 @@ Failure does not advance the schema version, releases the lock, and has a
 The schema version is a compatibility marker, not a claim that all old indexes
 were rebuilt. Releases predating schema 2.4.0 need separate legacy validation.
 
-Explicit Start Auto-Translate may resume an ordinary pause only after both
-cron events are scheduled. Missing credentials, a circuit breaker, an active
-limited sample, or scheduling failure must not be bypassed. No paid request is
-made by the start action itself.
+0.4.3 tied explicit Auto-Translate start to both Cron events. 0.4.4 replaces that
+behavior with independent scan and queue commands. Missing credentials, circuit
+breakers, active limited samples and scheduling failures cannot be bypassed.
 
 ## Real Database Regression Tests
 

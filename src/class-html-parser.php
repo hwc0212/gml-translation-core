@@ -13,6 +13,8 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+require_once __DIR__ . '/class-translation-text.php';
+
 class GML_HTML_Parser {
 
     private $skip_tags = [ 'script', 'style', 'code', 'pre', 'svg', 'noscript', 'iframe', 'textarea' ];
@@ -227,12 +229,8 @@ class GML_HTML_Parser {
         foreach ( $replacements as $original => $translated ) {
             if ( $original === $translated ) continue;
 
-            // ── Strip Markdown formatting from cached translations ───────────
-            // Gemini sometimes returns **Label:** prefixes or **bold** markers
-            // despite prompt instructions. Clean them before applying.
-            $translated = preg_replace( '/^\*{1,2}[^*]+:\*{1,2}\s*/', '', $translated );
-            $translated = preg_replace( '/\*{1,2}([^*]+)\*{1,2}/', '$1', $translated );
-            $translated = preg_replace( '/__([^_]+)__/', '$1', $translated );
+            // Remove unambiguous Markdown wrappers without altering dimensions.
+            $translated = GML_Translation_Text::clean_markdown_wrappers( $translated );
             // Translation records represent text nodes, never markup. Strip
             // any legacy/manual HTML and encode the final value before it is
             // inserted back into the raw document.
@@ -300,9 +298,7 @@ class GML_HTML_Parser {
                     $translated_title = $replacements[ $lookup_key ];
 
                     // Clean Markdown formatting (same as main loop)
-                    $translated_title = preg_replace( '/^\*{1,2}[^*]+:\*{1,2}\s*/', '', $translated_title );
-                    $translated_title = preg_replace( '/\*{1,2}([^*]+)\*{1,2}/', '$1', $translated_title );
-                    $translated_title = preg_replace( '/__([^_]+)__/', '$1', $translated_title );
+                    $translated_title = GML_Translation_Text::clean_markdown_wrappers( $translated_title );
                     $translated_title = html_entity_decode( wp_strip_all_tags( trim( $translated_title ) ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 
                     // Safety: strip "Description: ..." suffix that Gemini sometimes
@@ -445,9 +441,7 @@ class GML_HTML_Parser {
         }
 
         $translated = wp_strip_all_tags( (string) $replacements[ $key ] );
-        $translated = preg_replace( '/^\*{1,2}[^*]+:\*{1,2}\s*/', '', $translated );
-        $translated = preg_replace( '/\*{1,2}([^*]+)\*{1,2}/', '$1', $translated );
-        $translated = preg_replace( '/__([^_]+)__/', '$1', $translated );
+        $translated = GML_Translation_Text::clean_markdown_wrappers( $translated );
         $translated = html_entity_decode( trim( $translated ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
         return htmlspecialchars( $translated, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
     }

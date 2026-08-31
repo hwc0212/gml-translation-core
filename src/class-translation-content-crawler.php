@@ -43,6 +43,7 @@ class GML_Translation_Content_Crawler {
 	}
 
 	public function maybe_resume_crawl() {
+		if ( ! is_admin() && ! wp_doing_cron() ) return;
 		if ( ! get_option( 'gml_crawl_running', false ) ) {
 			return;
 		}
@@ -59,7 +60,7 @@ class GML_Translation_Content_Crawler {
 		}
 	}
 
-	public static function start_crawl( $resume_ai = false ) {
+	public static function start_crawl() {
 		if ( ! static::ai_translation_available() ) {
 			return new WP_Error( 'gml_ai_unavailable', 'Enable multilingual output and configure AI Translation before starting a crawl.' );
 		}
@@ -68,9 +69,6 @@ class GML_Translation_Content_Crawler {
 		}
 		if ( get_option( 'gml_translation_retry_sample_ids', [] ) ) {
 			return new WP_Error( 'gml_sample_running', 'A limited translation sample is still running. Wait for it to finish before starting a full crawl.' );
-		}
-		if ( get_option( 'gml_translation_paused', false ) && ! $resume_ai ) {
-			return new WP_Error( 'gml_manual_pause', 'Translation is paused. Use Start Auto-Translate to explicitly resume it.' );
 		}
 
 		$total = static::count_crawlable_content();
@@ -84,23 +82,16 @@ class GML_Translation_Content_Crawler {
 				return new WP_Error( 'gml_crawl_schedule_failed', 'WordPress could not schedule the content crawl. The translation queue remains unchanged.' );
 			}
 		}
-		if ( $resume_ai && class_exists( 'GML_Queue_Processor' ) && ! wp_next_scheduled( GML_Queue_Processor::CRON_HOOK ) ) {
-			$scheduled = wp_schedule_single_event( time() + 5, GML_Queue_Processor::CRON_HOOK, [], true );
-			if ( ! $scheduled || is_wp_error( $scheduled ) ) {
-				if ( $new_crawl_time !== null ) wp_unschedule_event( $new_crawl_time, static::CRON_HOOK );
-				return new WP_Error( 'gml_queue_schedule_failed', 'WordPress could not schedule the translation worker. Translation remains paused; check WP-Cron before retrying.' );
-			}
-		}
 		delete_option( 'gml_crawl_offset' );
+		delete_option( 'gml_crawl_completed' );
 		update_option( 'gml_crawl_total', $total, false );
 		update_option( 'gml_crawl_running', true, false );
-		if ( $resume_ai ) update_option( 'gml_translation_paused', false, false );
 		return true;
 	}
 
-	public static function stop_crawl() {
+	public static function stop_crawl( $completed = false ) {
 		update_option( 'gml_crawl_running', false, false );
-		delete_option( 'gml_crawl_total' );
+		update_option( 'gml_crawl_completed', $completed, false );
 		static::unschedule_crawl();
 	}
 
@@ -108,12 +99,17 @@ class GML_Translation_Content_Crawler {
 		$running = (bool) get_option( 'gml_crawl_running', false );
 		$offset  = max( 0, (int) get_option( 'gml_crawl_offset', 0 ) );
 		$total   = max( 0, (int) get_option( 'gml_crawl_total', 0 ) );
-		if ( $running && $total === 0 ) {
-			$total = static::count_crawlable_content();
-			update_option( 'gml_crawl_total', $total, false );
-		}
+		$next = wp_next_scheduled( static::CRON_HOOK );
+		if ( ! $running ) $state = get_option( 'gml_crawl_completed', false ) ? 'completed' : 'stopped';
+		elseif ( ! static::ai_translation_available() || GML_Queue_Processor::circuit_is_open() || get_option( 'gml_translation_retry_sample_ids', [] ) ) $state = 'blocked';
+		elseif ( (int) get_option( static::LOCK_OPTION, 0 ) > time() ) $state = 'scanning';
+		elseif ( ! $next ) $state = 'not_scheduled';
+		elseif ( $next < time() - 120 ) $state = 'overdue';
+		else $state = 'scheduled';
 		return [
 			'running'   => $running,
+			'state'     => $state,
+			'last_activity' => (int) get_option( 'gml_crawl_last_activity', 0 ),
 			'processed' => min( $offset, $total ),
 			'total'     => $total,
 			'percent'   => $total > 0 ? min( 100, round( $offset / $total * 100 ) ) : 0,
@@ -178,13 +174,16 @@ class GML_Translation_Content_Crawler {
 		] );
 
 		if ( empty( $posts ) ) {
-			static::stop_crawl();
+			static::stop_crawl( true );
 			return;
 		}
 
 		$parser     = new GML_HTML_Parser();
 		$translator = new GML_Translator();
+		$processed = 0;
 		foreach ( $posts as $post ) {
+			if ( ! get_option( 'gml_crawl_running', false ) || ! static::ai_translation_available() || static::safety_paused() ) break;
+			$processed++;
 			try {
 				$html = $this->fetch_rendered_html( $post );
 				if ( empty( $html ) ) {
@@ -200,25 +199,21 @@ class GML_Translation_Content_Crawler {
 					if (
 						$target === '' ||
 						$target === $source_lang ||
-						empty( $language['enabled'] ) && array_key_exists( 'enabled', $language ) ||
-						! empty( $language['paused'] )
+						empty( $language['enabled'] ) && array_key_exists( 'enabled', $language )
 					) {
 						continue;
 					}
-					$translator->translate( $parsed, $target );
+					$translator->discover( $parsed, $target );
 				}
 			} catch ( \Throwable $e ) {
 				static::log_event( 'post_failed', isset( $post->ID ) ? (int) $post->ID : 0 );
 			}
 		}
 
-		update_option( 'gml_crawl_offset', $offset + count( $posts ), false );
-		if ( class_exists( 'GML_Queue_Processor' ) && ! static::safety_paused() ) {
-			try {
-				( new GML_Queue_Processor() )->process_batch();
-			} catch ( \Throwable $e ) {
-				static::log_event( 'queue_failed' );
-			}
+		if ( $processed > 0 ) {
+			update_option( 'gml_crawl_offset', $offset + $processed, false );
+			update_option( 'gml_crawl_last_activity', time(), false );
+			if ( $offset + $processed >= (int) get_option( 'gml_crawl_total', 0 ) ) static::stop_crawl( true );
 		}
 	}
 
@@ -341,7 +336,7 @@ class GML_Translation_Content_Crawler {
 	}
 
 	protected static function safety_paused() {
-		if ( get_option( 'gml_translation_paused', false ) ) {
+		if ( get_option( 'gml_translation_retry_sample_ids', [] ) ) {
 			return true;
 		}
 		return class_exists( 'GML_Queue_Processor' )

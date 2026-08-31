@@ -43,10 +43,10 @@ try { (new GML_Translation_Editor())->ajax_crawl_action(); }
 catch ( GML_Test_Json_Done $done ) {}
 $raw = ob_get_clean();
 $response = json_decode( $raw, true );
-if ( $case === 'resume' ) {
-    gml_db_assert( ! empty( $response['success'] ), 'real AJAX resumes ordinary pause without a preloaded crawler instance' );
-    gml_db_assert( ! get_option( 'gml_translation_paused' ) && get_option( 'gml_crawl_running' ), 'successful start changes pause and running state' );
-    gml_db_assert( wp_next_scheduled( 'gml_crawl_content' ) && wp_next_scheduled( 'gml_process_queue' ), 'crawl interval and queue wake-up are both scheduled' );
+if ( in_array( $case, [ 'resume', 'queue-schedule' ], true ) ) {
+    gml_db_assert( ! empty( $response['success'] ), 'real AJAX starts an independent scan from an ordinary pause' );
+    gml_db_assert( get_option( 'gml_translation_paused' ) && get_option( 'gml_crawl_running' ), 'successful scan start leaves translation paused' );
+    gml_db_assert( wp_next_scheduled( 'gml_crawl_content' ) && ! wp_next_scheduled( 'gml_process_queue' ), 'scan schedules only its own task, even when the queue scheduler is unavailable' );
 } else {
     gml_db_assert( empty( $response['success'] ), $case . ' blocks full crawl' );
     gml_db_assert( get_option( 'gml_translation_paused' ) && ! get_option( 'gml_crawl_running' ) && (int) get_option( 'gml_crawl_offset' ) === 12, $case . ' preserves pause and progress state' );
