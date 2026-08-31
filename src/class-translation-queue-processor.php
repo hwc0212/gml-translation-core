@@ -124,13 +124,19 @@ abstract class GML_Translation_Queue_Processor {
             }
             $sample_sql = $sample_ids ? ' AND id IN (' . implode( ',', $sample_ids ) . ')' : '';
             $limit      = (int) static::BATCH_SIZE;
-            $items      = $wpdb->get_results(
-                "SELECT * FROM $queue_table
+            $query      = "SELECT * FROM $queue_table
                  WHERE status = 'pending' AND attempts < 3
-                 $exclude_sql $sample_sql
-                 ORDER BY target_lang ASC, context_type ASC, priority DESC, created_at ASC
-                 LIMIT $limit"
-            );
+                 $exclude_sql $sample_sql";
+            $order      = " ORDER BY target_lang ASC, context_type ASC, priority DESC, created_at ASC, id ASC LIMIT $limit";
+            $last_batch = get_option( 'gml_translation_last_batch', [] );
+            $last_lang  = is_array( $last_batch ) ? sanitize_key( $last_batch['language'] ?? '' ) : '';
+            // Rotate languages under the existing worker lock; one batch still runs per tick.
+            $items = $last_lang !== ''
+                ? $wpdb->get_results( $query . $wpdb->prepare( ' AND target_lang > %s', $last_lang ) . $order )
+                : [];
+            if ( ! $items ) {
+                $items = $wpdb->get_results( $query . $order );
+            }
 
             if ( empty( $items ) ) {
                 if ( $sample_ids ) {

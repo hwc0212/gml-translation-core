@@ -35,6 +35,23 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.4.6 Routing And Queue Fairness
+
+Both adapters register language rules before the activation flush, including
+activation after WordPress init. An authorized, non-AJAX/non-Cron admin request
+can repair missing or outdated language rules without replacing other plugins'
+persisted routes. No frontend rewrite repair, AI request or translation-data
+migration is added. Multilingual routing never requires a provider credential.
+
+Queue selection rotates after the last processed language, wrapping when no
+later eligible language has work. The existing lock, one-batch limit, pause,
+circuit breaker and bounded retry selection remain unchanged. Selection uses
+at most two bounded queries and does not increase concurrency or reset progress.
+
+Real WordPress regressions cover late activation, lost rules, route preservation,
+language changes, disable/re-enable, root/subdirectory homepages and inner pages,
+search and genuine 404s, plus Russian/Spanish fairness with a synthetic provider.
+
 ## 0.4.5 Credential Safety
 
 Both adapters share legacy-compatible credential storage. Failed decryption

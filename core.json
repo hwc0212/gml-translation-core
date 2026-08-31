@@ -1,6 +1,6 @@
 {
   "name": "gml-translation-core",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "php": ">=7.4",
   "license": "GPL-2.0-or-later"
 }
