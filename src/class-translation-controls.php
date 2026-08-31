@@ -21,6 +21,7 @@ class GML_Translation_Controls {
             if ( isset( $post['gml_lang_action'] ) && $lang === '' ) return new WP_Error( 'invalid_language', 'Choose a configured language.' );
             if ( in_array( $action, [ 'start_all', 'start_lang' ], true ) ) return self::start( $lang );
             if ( in_array( $action, [ 'pause_all', 'pause_lang' ], true ) ) return self::pause( $lang );
+            if ( $action === 'resume_sample' ) return self::resume_sample();
             return new WP_Error( 'invalid_action', 'Invalid translation action.' );
         }
         return null;
@@ -34,7 +35,7 @@ class GML_Translation_Controls {
         if ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() ) {
             return new WP_Error( 'safety_pause', 'Translation is safety-paused. Test the saved AI connection and retry a limited language sample first.' );
         }
-        if ( get_option( GML_Queue_Processor::SAMPLE_OPTION, [] ) ) return new WP_Error( 'sample_running', 'A limited translation sample is still running.' );
+        if ( get_option( GML_Queue_Processor::SAMPLE_OPTION, [] ) ) return new WP_Error( 'sample_running', 'A limited translation sample is active. Resume that sample before starting other work.' );
         $languages = (array) get_option( 'gml_languages', [] );
         $found = false;
         foreach ( $languages as &$language ) {
@@ -49,6 +50,64 @@ class GML_Translation_Controls {
             $scheduled = wp_schedule_single_event( time() + 5, GML_Queue_Processor::CRON_HOOK, [], true );
             if ( ! $scheduled || is_wp_error( $scheduled ) ) return new WP_Error( 'schedule_failed', 'WordPress could not schedule translation. Pause settings were kept.' );
         }
+        update_option( 'gml_languages', $languages );
+        update_option( 'gml_translation_paused', false, false );
+        return true;
+    }
+
+    /** Read at most one approved sample; never scan the full translation queue. */
+    public static function sample_status() {
+        $raw = (array) get_option( GML_Queue_Processor::SAMPLE_OPTION, [] );
+        $state = [ 'active' => ! empty( $raw ), 'valid' => false, 'total' => count( $raw ), 'remaining' => 0, 'language' => '', 'paused' => (bool) get_option( 'gml_translation_paused', false ) ];
+        if ( ! $raw || count( $raw ) > GML_Queue_Processor::RETRY_LIMIT ) return $state;
+        $ids = array_values( array_unique( array_filter( array_map( 'intval', $raw ), static function( $id ) { return $id > 0; } ) ) );
+        if ( count( $ids ) !== count( $raw ) ) return $state;
+        global $wpdb;
+        $rows = $wpdb->get_results( "SELECT target_lang, status, attempts FROM {$wpdb->prefix}gml_queue WHERE id IN (" . implode( ',', $ids ) . ')' );
+        if ( ! is_array( $rows ) ) return $state;
+        $targets = array_values( array_unique( array_column( $rows, 'target_lang' ) ) );
+        if ( count( $targets ) !== 1 ) return $state;
+        $state['language'] = $targets[0];
+        foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
+            if ( ( $language['code'] ?? '' ) === $state['language'] && ( ! isset( $language['enabled'] ) || $language['enabled'] ) ) {
+                $state['valid'] = true;
+                $state['paused'] = $state['paused'] || ! empty( $language['paused'] );
+            }
+        }
+        foreach ( $rows as $row ) {
+            if ( in_array( $row->status, [ 'pending', 'processing' ], true ) && (int) $row->attempts < 3 ) $state['remaining']++;
+        }
+        return $state;
+    }
+
+    public static function resume_sample() {
+        if ( ! current_user_can( 'manage_options' ) ) return new WP_Error( 'forbidden', 'Unauthorized' );
+        if ( ! GML_Translation_State::multilingual_enabled() || ! GML_Translation_State::ai_available() ) {
+            return new WP_Error( 'ai_unavailable', 'Enable the multilingual site and configure AI Translation first.' );
+        }
+        if ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() ) {
+            return new WP_Error( 'safety_pause', 'Translation is safety-paused. Test the saved AI connection and retry a limited language sample first.' );
+        }
+        $sample = self::sample_status();
+        if ( ! $sample['active'] || ! $sample['valid'] ) return new WP_Error( 'invalid_sample', 'No valid limited sample is available for an enabled language.' );
+        $lock = (array) get_option( GML_Queue_Processor::LOCK_OPTION, [] );
+        if ( ! empty( $lock['token'] ) && (int) ( $lock['expires'] ?? 0 ) > time() ) {
+            return new WP_Error( 'sample_busy', 'The current translation batch is still finishing. Try again after it stops.' );
+        }
+        if ( ! $sample['remaining'] ) {
+            delete_option( GML_Queue_Processor::SAMPLE_OPTION );
+            return self::pause();
+        }
+        if ( ! wp_next_scheduled( GML_Queue_Processor::CRON_HOOK ) ) {
+            $scheduled = wp_schedule_single_event( time() + 5, GML_Queue_Processor::CRON_HOOK, [], true );
+            if ( ! $scheduled || is_wp_error( $scheduled ) ) return new WP_Error( 'schedule_failed', 'WordPress could not schedule translation. Pause settings were kept.' );
+        }
+        // Retain the same IDs and attempt counters; only resume their language.
+        $languages = (array) get_option( 'gml_languages', [] );
+        foreach ( $languages as &$language ) {
+            if ( ( $language['code'] ?? '' ) === $sample['language'] ) $language['paused'] = false;
+        }
+        unset( $language );
         update_option( 'gml_languages', $languages );
         update_option( 'gml_translation_paused', false, false );
         return true;

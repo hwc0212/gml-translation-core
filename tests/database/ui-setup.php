@@ -16,7 +16,10 @@ if ( array_diff( (array) get_option( 'active_plugins', [] ), [ $slug . '/' . $sl
 deactivate_plugins( get_option( 'active_plugins', [] ) );
 update_option( 'gml_multilingual_enabled', true );
 update_option( 'gml_ai_translation_enabled', true );
-if ( ! class_exists( 'GML_Translation_Credentials' ) ) require_once __DIR__ . '/../../src/class-translation-credentials.php';
+if ( ! class_exists( 'GML_Translation_Credentials' ) ) {
+    $vendor = $slug === 'gml-seo' ? '/includes/modules/translate/vendor/' : '/includes/vendor/';
+    require_once WP_PLUGIN_DIR . '/' . $slug . $vendor . 'gml-translation-core/src/class-translation-credentials.php';
+}
 GML_Translation_Credentials::save( 'test-only-never-sent', 'gemini' );
 update_option( 'gml_seo', [ 'module_ai_translation_enabled' => 1, 'engine' => 'gemini', 'gemini_key' => 'test-only-never-sent' ] );
 update_option( 'gml_languages', [ [ 'code' => 'de', 'native_name' => 'Deutsch', 'country' => 'de', 'enabled' => true, 'paused' => true ] ] );

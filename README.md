@@ -35,6 +35,22 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.4.7 Paused Sample Recovery
+
+An approved retry sample now has its own explicit Resume Sample command.
+Pausing it no longer leaves every start control disabled. Resume validates
+the existing scope (one enabled language, at most 25 IDs), credentials,
+permissions, nonce, circuit breaker and active worker lock. Scheduling must
+succeed before unpausing. Existing IDs, attempts, translations and unrelated
+language pauses are preserved. Sample completion still pauses the queue;
+neither a normal full start nor a content scan bypasses the sample boundary.
+
+Admin-only sample summaries use a bounded primary-key lookup. No frontend
+queries, provider calls, data migrations or automatic retries are introduced.
+New retries use the same scheduling-first resume path. Database and local
+browser tests cover repeated pause/resume, partial completion, protected
+failure paths and automatic pause after completing only the approved sample.
+
 ## 0.4.6 Routing And Queue Fairness
 
 Both adapters register language rules before the activation flush, including

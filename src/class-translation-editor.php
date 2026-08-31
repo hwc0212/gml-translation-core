@@ -185,15 +185,11 @@ class GML_Translation_Editor_Core {
             wp_send_json_error( __( 'No failed items were queued. Another retry sample may still be running.', static::TEXT_DOMAIN ) );
         }
 
-        // This click is explicit approval for one limited sample only.
-        update_option( 'gml_translation_paused', false );
-        $languages = (array) get_option( 'gml_languages', [] );
-        foreach ( $languages as &$language ) {
-            $language['paused'] = ( $language['code'] ?? '' ) !== $lang;
+        // Scheduling must succeed before resuming this explicitly approved sample.
+        $resumed = GML_Translation_Controls::resume_sample();
+        if ( is_wp_error( $resumed ) ) {
+            wp_send_json_error( __( $resumed->get_error_message(), static::TEXT_DOMAIN ) );
         }
-        unset( $language );
-        update_option( 'gml_languages', $languages );
-        wp_schedule_single_event( time(), GML_Queue_Processor::CRON_HOOK );
 
         wp_send_json_success( [
             'message' => sprintf( __( '%d failed items queued as a limited test sample.', static::TEXT_DOMAIN ), $count ),

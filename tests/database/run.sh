@@ -17,6 +17,8 @@ done
 for pid in "${pids[@]}"; do wait "$pid"; done
 php "$ROOT/enqueue.php" verify
 php "$ROOT/controls.php"
+php "$ROOT/sample-resume.php"
+php "$ROOT/sample-schedule.php"
 php "$ROOT/technical-text.php"
 php "$ROOT/credentials.php"
 php "$ROOT/credentials-admin.php"
