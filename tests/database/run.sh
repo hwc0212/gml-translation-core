@@ -18,6 +18,8 @@ for pid in "${pids[@]}"; do wait "$pid"; done
 php "$ROOT/enqueue.php" verify
 php "$ROOT/controls.php"
 php "$ROOT/technical-text.php"
+php "$ROOT/credentials.php"
+php "$ROOT/credentials-admin.php"
 for scenario in resume breaker sample schedule queue-schedule no-key unauthorized nonce; do
     php "$ROOT/crawl.php" "$scenario"
 done

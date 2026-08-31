@@ -9,6 +9,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
+require_once __DIR__ . '/class-translation-credentials.php';
+
 class GML_Translation_State {
 	const MULTILINGUAL_OPTION = 'gml_multilingual_enabled';
 	const AI_OPTION           = 'gml_ai_translation_enabled';
@@ -53,8 +55,7 @@ class GML_Translation_State {
 		if ( self::is_seo_hosted() && class_exists( 'GML_SEO' ) && method_exists( 'GML_SEO', 'has_ai_key' ) ) {
 			return GML_SEO::has_ai_key();
 		}
-		return ! empty( get_option( 'gml_api_key_encrypted' ) )
-			|| ! empty( get_option( 'gml_deepseek_api_key_encrypted' ) );
+		return GML_Translation_Credentials::read( get_option( 'gml_translation_engine', 'gemini' ) ) !== '';
 	}
 
 	public static function ai_available() {

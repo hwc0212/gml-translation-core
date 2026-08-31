@@ -35,6 +35,22 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.4.5 Credential Safety
+
+Both adapters share legacy-compatible credential storage. Failed decryption
+returns no key, never ciphertext. Writes must succeed and read back exactly.
+The existing raw-salt AES-CBC format and option names remain unchanged for
+rollback; historical Gemini/DeepSeek plaintext formats are read-only fallbacks.
+Unrecognized plaintext records require re-entry, while newly saved opaque keys
+are supported without a provider-prefix assumption. No keys are migrated on read.
+
+Standalone availability checks only the selected provider's readable credential.
+Missing or unreadable keys stop new AI work, not existing multilingual output.
+Connection errors redact the actual request credential, including opaque formats.
+Database tests cover save/read/test, failed writes, wrong salts, admin nonces,
+permissions and preservation of the paused queue. All credentials are synthetic
+and all HTTP responses are mocked; these tests do not certify a live API account.
+
 ## 0.4.4 Controls And Technical Text
 
 Content discovery and AI work are independent. A scan can enqueue missing text

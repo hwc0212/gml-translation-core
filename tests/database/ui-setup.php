@@ -16,7 +16,8 @@ if ( array_diff( (array) get_option( 'active_plugins', [] ), [ $slug . '/' . $sl
 deactivate_plugins( get_option( 'active_plugins', [] ) );
 update_option( 'gml_multilingual_enabled', true );
 update_option( 'gml_ai_translation_enabled', true );
-update_option( 'gml_api_key_encrypted', 'test-only-never-sent' );
+if ( ! class_exists( 'GML_Translation_Credentials' ) ) require_once __DIR__ . '/../../src/class-translation-credentials.php';
+GML_Translation_Credentials::save( 'test-only-never-sent', 'gemini' );
 update_option( 'gml_seo', [ 'module_ai_translation_enabled' => 1, 'engine' => 'gemini', 'gemini_key' => 'test-only-never-sent' ] );
 update_option( 'gml_languages', [ [ 'code' => 'de', 'native_name' => 'Deutsch', 'country' => 'de', 'enabled' => true, 'paused' => true ] ] );
 update_option( 'gml_translation_paused', true );

@@ -3,7 +3,7 @@ require __DIR__ . '/bootstrap.php';
 wp_set_current_user( 1 );
 update_option( 'gml_multilingual_enabled', true );
 update_option( 'gml_ai_translation_enabled', true );
-update_option( 'gml_api_key_encrypted', 'test-only-never-sent' );
+GML_Gemini_API::save_api_key( 'test-only-never-sent', 'gemini' );
 update_option( 'gml_source_lang', 'en' );
 update_option( 'gml_languages', [ [ 'code' => 'de', 'enabled' => true, 'paused' => true ] ] );
 update_option( 'gml_translation_paused', true );

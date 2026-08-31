@@ -3,7 +3,7 @@ define( 'DOING_CRON', true );
 require __DIR__ . '/bootstrap.php';
 update_option( 'gml_multilingual_enabled', true );
 update_option( 'gml_ai_translation_enabled', true );
-update_option( 'gml_api_key_encrypted', 'test-only-never-sent' );
+GML_Gemini_API::save_api_key( 'test-only-never-sent', 'gemini' );
 update_option( 'gml_translation_paused', true );
 update_option( 'gml_crawl_running', true );
 if ( class_exists( 'GML_SEO' ) ) {

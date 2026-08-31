@@ -4,7 +4,7 @@ require __DIR__ . '/bootstrap.php';
 wp_set_current_user( 1 );
 update_option( 'gml_multilingual_enabled', true );
 update_option( 'gml_ai_translation_enabled', true );
-update_option( 'gml_api_key_encrypted', 'disposable-test-key-not-used' );
+GML_Gemini_API::save_api_key( 'disposable-test-key-not-used', 'gemini' );
 if ( class_exists( 'GML_SEO' ) ) {
     update_option( 'gml_seo', [ 'module_ai_translation_enabled' => 1, 'engine' => 'gemini', 'gemini_key' => 'disposable-test-key-not-used' ] );
     $cache = new ReflectionProperty( GML_SEO::class, 'opt_cache' );

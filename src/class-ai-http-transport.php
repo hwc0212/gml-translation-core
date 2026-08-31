@@ -88,6 +88,12 @@ class GML_AI_HTTP_Transport {
                 self::pause( isset( $error['retry_after'] ) ? $error['retry_after'] : 1 );
                 continue;
             }
+            foreach ( $headers as $name => $value ) {
+                if ( in_array( strtolower( $name ), [ 'authorization', 'x-goog-api-key' ], true ) ) {
+                    $secret = preg_replace( '/^Bearer\s+/i', '', (string) $value );
+                    if ( $secret !== '' ) $error['message'] = str_replace( $secret, '[redacted]', $error['message'] );
+                }
+            }
             $this->last_error = $error;
             return [
                 'ok'     => false,

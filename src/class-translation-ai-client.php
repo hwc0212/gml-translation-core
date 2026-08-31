@@ -15,6 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 require_once __DIR__ . '/interface-translation-ai-provider.php';
 require_once __DIR__ . '/class-ai-http-transport.php';
 require_once __DIR__ . '/class-translation-text.php';
+require_once __DIR__ . '/class-translation-credentials.php';
 
 class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface {
 
@@ -28,6 +29,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
 
     private $engine;
     private $api_key;
+    private $credential_error;
     private $model;
     private $label;
     private $style;
@@ -42,7 +44,8 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
     public function __construct( array $config ) {
         $this->engine        = sanitize_key( $config['engine'] ?? '' );
         $api_key             = trim( (string) ( $config['api_key'] ?? '' ) );
-		$this->api_key       = strlen( $api_key ) <= self::MAX_API_KEY_BYTES ? $api_key : '';
+		$this->api_key       = GML_Translation_Credentials::valid_input( $api_key ) ? $api_key : '';
+        $this->credential_error = ! empty( $config['credential_error'] );
         $this->model         = substr( sanitize_text_field( $config['model'] ?? '' ), 0, 120 );
         $this->label         = sanitize_text_field( $config['label'] ?? 'AI' );
         $this->style         = ( $config['style'] ?? '' ) === self::STYLE_OPENAI ? self::STYLE_OPENAI : self::STYLE_GEMINI;
@@ -71,6 +74,9 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
     }
 
     public function validate_credentials() {
+        if ( $this->credential_error ) {
+            return [ 'valid' => false, 'message' => GML_Translation_Credentials::error_message(), 'network_tested' => false ];
+        }
         if ( $this->api_key === '' ) {
             return [ 'valid' => false, 'message' => $this->label . ' API key not configured.', 'network_tested' => false ];
         }
@@ -139,9 +145,11 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             'max_tokens' => 20,
             'retries'    => 0,
         ] );
+        $valid = ! empty( $result['ok'] ) && trim( (string) ( $result['text'] ?? '' ) ) !== '';
         return [
-            'valid'   => ! empty( $result['ok'] ) && trim( (string) ( $result['text'] ?? '' ) ) !== '',
-            'message' => ! empty( $result['ok'] )
+            'valid'   => $valid,
+            'network_tested' => ( $result['error']['code'] ?? '' ) !== 'provider_not_configured',
+            'message' => $valid
                 ? $this->label . ' API key is valid!'
                 : ( $result['error']['message'] ?? $this->label . ' returned an unexpected response.' ),
         ];
