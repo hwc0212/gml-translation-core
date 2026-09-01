@@ -29,6 +29,8 @@ libxml_clear_errors();
 libxml_use_internal_errors( $previous_errors );
 $xpath = new DOMXPath( $document );
 gml_db_assert( $xpath->query( '//input[@id="gml_api_key"]/ancestor::form[@id="gml-main-settings-form"]' )->length === 1, 'credential input belongs to the main settings form' );
+gml_db_assert( $xpath->query( '//select[@id="gml_translation_engine"]/option[@value="qwen" or @value="openai"]' )->length === 2, 'standalone settings expose the same four translation providers as GML SEO' );
+gml_db_assert( $xpath->query( '//input[@id="gml_qwen_api_key" or @id="gml_openai_api_key"]' )->length === 2, 'Qwen and OpenAI credentials stay inside password inputs' );
 gml_db_assert( $xpath->query( '//form[@id="gml-main-settings-form"]//input[@name="action" or @name="gml_test_connection"]' )->length === 0, 'saving credentials does not submit reorder or test actions' );
 gml_db_assert( $xpath->query( '//form[@id="gml-test-connection-form"]//input[@name="gml_api_key"]' )->length === 0, 'test form cannot submit a draft credential' );
 gml_db_assert( GML_Gemini_API::decrypt_key( get_option( 'gml_api_key_encrypted' ) ) === $key, 'admin save persists the entered key exactly' );

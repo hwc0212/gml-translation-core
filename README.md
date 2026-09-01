@@ -35,6 +35,24 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.4.11 Incremental Sync And Token Efficiency
+
+Saving a published public post now records a bounded dirty-object marker and
+schedules a two-object incremental discovery job. The job renders only changed
+objects, queues missing source hashes for enabled languages, and leaves the AI
+worker's pause state untouched. Provider failures or disabled AI leave markers
+for a later admin/Cron retry; no provider call occurs in the editor save request.
+
+Translation batches deduplicate identical source strings, include only protected
+terms and glossary rules present in that batch, and use an output allowance sized
+to the request. Pure specifications such as `<40°C`, `<70%`, and `90*45*30mm`
+bypass AI and are stored unchanged. Plain-text cleanup, memory reads, attributes,
+and rendered HTML preserve comparison signs while still stripping actual markup.
+
+Standalone credential storage now includes independent encrypted Qwen and OpenAI
+keys in addition to Gemini and DeepSeek. No existing key, queue row, translation,
+URL, manual edit, glossary rule, or pause setting is migrated or deleted.
+
 ## 0.4.10 Failure Recovery And Readiness
 
 Provider failures are classified without changing the queue schema. HTTP 429,

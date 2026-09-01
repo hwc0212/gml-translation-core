@@ -14,6 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 require_once __DIR__ . '/class-translation-queue-scope.php';
 require_once __DIR__ . '/class-translation-error.php';
+require_once __DIR__ . '/class-translation-text.php';
 
 abstract class GML_Translation_Queue_Processor {
 
@@ -29,7 +30,7 @@ abstract class GML_Translation_Queue_Processor {
     const SINGLE_FALLBACK_LIMIT = 3;
     const LOCK_TTL = 600;
     const BATCH_SIZE = 30;
-	const MAX_BATCH_INPUT_BYTES = 131072;
+	const MAX_BATCH_INPUT_BYTES = 24576;
 
     public function __construct() {
         add_filter( 'cron_schedules', [ static::class, 'add_cron_interval' ] );
@@ -205,10 +206,37 @@ abstract class GML_Translation_Queue_Processor {
             $api        = $this->create_api();
             $translator = $this->create_translator();
             $parser     = $this->create_parser();
+            $saved      = false;
+            $api_items  = [];
+            foreach ( $items as $item ) {
+                if ( GML_Translation_Text::is_technical_only( $item->source_text ) ) {
+                    $saved = $this->save_translation_result(
+                        $wpdb,
+                        $queue_table,
+                        $item,
+                        (string) $item->source_text,
+                        $translator,
+                        $parser
+                    ) || $saved;
+                    continue;
+                }
+                $api_items[] = $item;
+            }
+            $items = $api_items;
+            if ( empty( $items ) ) {
+                if ( $saved ) {
+                    static::clear_backoff();
+                    static::invalidate_translation_state();
+                }
+                if ( $sample_ids && ! (int) $wpdb->get_var( "SELECT COUNT(*) FROM $queue_table WHERE status IN ('pending','processing') AND attempts < 3 AND id IN (" . implode( ',', $sample_ids ) . ')' ) ) {
+                    static::complete_sample_mode();
+                }
+                return;
+            }
+
             $texts      = array_map( static function( $item ) { return (string) $item->source_text; }, $items );
             $source     = (string) $first->source_lang;
             $target     = (string) $first->target_lang;
-            $saved      = false;
             $activity = [ 'token' => $lock_token, 'started' => time(), 'language' => $target ];
             update_option( 'gml_translation_last_batch', $activity, false );
 

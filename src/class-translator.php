@@ -9,6 +9,8 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+require_once __DIR__ . '/class-translation-text.php';
+
 class GML_Translation_Translator {
 	const MAX_SOURCE_BYTES = 32768;
 
@@ -157,7 +159,7 @@ class GML_Translation_Translator {
 			foreach ( (array) $rows as $row ) {
 				$translated = (string) $row->translated_text;
 				self::$memory_cache[ $pair ][ $row->source_hash ] = strpos( $translated, '<' ) !== false
-					? wp_strip_all_tags( $translated )
+					? GML_Translation_Text::plain_text( $translated )
 					: $translated;
 			}
 			foreach ( $chunk as $hash ) {
@@ -192,7 +194,7 @@ class GML_Translation_Translator {
 			foreach ( (array) $rows as $row ) {
 				$translated = (string) $row->translated_text;
 				self::$memory_cache[ $pair ][ $row->source_hash ] = strpos( $translated, '<' ) !== false
-					? wp_strip_all_tags( $translated )
+					? GML_Translation_Text::plain_text( $translated )
 					: $translated;
 			}
 			self::$dict_loaded[ $pair ] = true;
@@ -239,7 +241,7 @@ class GML_Translation_Translator {
         if ( isset( self::$memory_cache[ $pair ] ) ) {
             $clean = (string) $translated_text;
 			self::$memory_cache[ $pair ][ $hash ] = strpos( $clean, '<' ) !== false
-                ? wp_strip_all_tags( $clean )
+                ? GML_Translation_Text::plain_text( $clean )
                 : $clean;
 			unset( self::$known_missing[ $pair ][ $hash ] );
         }

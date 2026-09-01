@@ -64,7 +64,7 @@ class GML_Glossary {
      * @param string $target_lang Target language code
      * @return string Instruction text to append to system prompt, or empty string
      */
-    public static function build_prompt_instruction( $target_lang ) {
+    public static function build_prompt_instruction( $target_lang, $source_text = '' ) {
         $rules = self::get_rules();
         if ( empty( $rules ) ) {
             return '';
@@ -79,6 +79,7 @@ class GML_Glossary {
             if ( count( $translations ) >= self::MAX_PROMPT_RULES ) break;
             if ( empty( $rule['enabled'] ) ) continue;
             if ( empty( $rule['source'] ) ) continue;
+            if ( $source_text !== '' && ! self::contains( $source_text, (string) $rule['source'] ) ) continue;
 
             // Rule applies to this language or all languages
             $rule_lang = sanitize_key( $rule['lang'] ?? 'all' );
@@ -111,5 +112,12 @@ class GML_Glossary {
 	private static function truncate( $value, $length ) {
 		$value = trim( (string) $value );
 		return function_exists( 'mb_substr' ) ? mb_substr( $value, 0, $length ) : substr( $value, 0, $length );
+	}
+
+	private static function contains( $haystack, $needle ) {
+		if ( $needle === '' ) return false;
+		return function_exists( 'mb_stripos' )
+			? mb_stripos( (string) $haystack, (string) $needle, 0, 'UTF-8' ) !== false
+			: stripos( (string) $haystack, (string) $needle ) !== false;
 	}
 }

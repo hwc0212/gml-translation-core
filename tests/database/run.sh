@@ -25,12 +25,16 @@ php "$ROOT/sample-resume.php"
 php "$ROOT/sample-schedule.php"
 php "$ROOT/queue-scopes.php"
 php "$ROOT/technical-text.php"
+php "$ROOT/technical-queue.php"
+php "$ROOT/token-efficiency.php"
 php "$ROOT/credentials.php"
 php "$ROOT/credentials-admin.php"
+php "$ROOT/provider-adapters.php"
 php "$ROOT/queue-fairness.php"
 for scenario in resume breaker sample schedule queue-schedule no-key unauthorized nonce; do
     php "$ROOT/crawl.php" "$scenario"
 done
+php "$ROOT/incremental-sync.php"
 slug="$(basename "$GML_TEST_PRODUCT_DIR")"
 test "$slug" = gml-seo || test "$slug" = gml-translate
 test -f "$GML_TEST_WP_ROOT/wp-config.php"

@@ -234,7 +234,7 @@ class GML_HTML_Parser {
             // Translation records represent text nodes, never markup. Strip
             // any legacy/manual HTML and encode the final value before it is
             // inserted back into the raw document.
-            $translated = html_entity_decode( wp_strip_all_tags( trim( $translated ) ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+            $translated = html_entity_decode( GML_Translation_Text::plain_text( trim( $translated ) ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 
             // ── Preserve leading/trailing decorative symbols ──────────────────
             // Gemini often strips decorative Unicode symbols (✔, ✓, ★, ●, ▶, →,
@@ -299,7 +299,7 @@ class GML_HTML_Parser {
 
                     // Clean Markdown formatting (same as main loop)
                     $translated_title = GML_Translation_Text::clean_markdown_wrappers( $translated_title );
-                    $translated_title = html_entity_decode( wp_strip_all_tags( trim( $translated_title ) ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                    $translated_title = html_entity_decode( GML_Translation_Text::plain_text( trim( $translated_title ) ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 
                     // Safety: strip "Description: ..." suffix that Gemini sometimes
                     // appends when it merges title and description translations.
@@ -440,7 +440,7 @@ class GML_HTML_Parser {
             return $raw;
         }
 
-        $translated = wp_strip_all_tags( (string) $replacements[ $key ] );
+        $translated = GML_Translation_Text::plain_text( (string) $replacements[ $key ] );
         $translated = GML_Translation_Text::clean_markdown_wrappers( $translated );
         $translated = html_entity_decode( trim( $translated ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
         return htmlspecialchars( $translated, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
@@ -552,6 +552,7 @@ class GML_HTML_Parser {
     }
 
     private function skip_text( $text ) {
+        if ( GML_Translation_Text::is_technical_only( $text ) ) return true;
         if ( is_numeric( $text ) ) return true;
         if ( mb_strlen( $text ) < 2 ) return true;
         if ( filter_var( $text, FILTER_VALIDATE_URL ) ) return true;

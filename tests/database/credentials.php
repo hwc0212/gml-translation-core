@@ -6,6 +6,8 @@ $key = 'local-test-opaque-credential.1234567890';
 $old_options = get_option( 'gml_seo', [] );
 delete_option( 'gml_api_key_encrypted' );
 delete_option( 'gml_deepseek_api_key_encrypted' );
+delete_option( 'gml_qwen_api_key_encrypted' );
+delete_option( 'gml_openai_api_key_encrypted' );
 update_option( 'gml_translation_engine', 'gemini' );
 $iv = str_repeat( 'x', 16 );
 $foreign = base64_encode( $iv . openssl_encrypt( $key, 'AES-256-CBC', 'different-site-salt', OPENSSL_RAW_DATA, $iv ) );
@@ -87,8 +89,17 @@ if ( ! defined( 'GML_SEO_VER' ) ) {
     update_option( 'gml_api_key_encrypted', $foreign );
     gml_db_assert( ! GML_Translation_State::ai_available(), 'unreadable key prevents new AI work' );
     gml_db_assert( GML_Translation_State::multilingual_enabled(), 'invalid credentials never turn off existing language pages' );
+    foreach ( [ 'qwen', 'openai' ] as $engine ) {
+        $provider_key = 'local-test-' . $engine . '-opaque-key';
+        gml_db_assert( GML_Gemini_API::save_api_key( $provider_key, $engine ), $engine . ' credential can be encrypted and saved' );
+        update_option( 'gml_translation_engine', $engine );
+        gml_db_assert( GML_Translation_State::has_api_key(), $engine . ' can be selected without reusing another provider key' );
+        gml_db_assert( GML_Translation_Credentials::read( $engine ) === $provider_key, $engine . ' credential round trip is exact' );
+    }
 }
 delete_option( 'gml_api_key_encrypted' );
 delete_option( 'gml_deepseek_api_key_encrypted' );
+delete_option( 'gml_qwen_api_key_encrypted' );
+delete_option( 'gml_openai_api_key_encrypted' );
 if ( defined( 'GML_SEO_VER' ) ) update_option( 'gml_seo', $old_options );
 echo "OK credential lifecycle (synthetic keys, no external HTTP)\n";

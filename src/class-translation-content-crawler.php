@@ -11,14 +11,21 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class GML_Translation_Content_Crawler {
-	const CRON_HOOK   = 'gml_crawl_content';
-	const BATCH_SIZE  = 5;
-	const LOCK_OPTION = 'gml_translation_crawl_lock';
+	const CRON_HOOK              = 'gml_crawl_content';
+	const INCREMENTAL_CRON_HOOK  = 'gml_discover_changed_content';
+	const DIRTY_POSTS_OPTION     = 'gml_translation_dirty_posts';
+	const BATCH_SIZE             = 5;
+	const INCREMENTAL_BATCH_SIZE = 2;
+	const MAX_DIRTY_POSTS        = 200;
+	const LOCK_OPTION            = 'gml_translation_crawl_lock';
 
 	public function __construct() {
 		add_action( static::CRON_HOOK, [ $this, 'crawl_batch' ] );
+		add_action( static::INCREMENTAL_CRON_HOOK, [ $this, 'discover_changed_content' ] );
 		add_filter( 'cron_schedules', [ static::class, 'add_schedule' ] );
 		add_action( 'wp_loaded', [ $this, 'maybe_resume_crawl' ] );
+		add_action( 'wp_loaded', [ $this, 'maybe_schedule_incremental' ] );
+		add_action( 'save_post', [ $this, 'remember_changed_post' ], 30, 3 );
 	}
 
 	public static function request_token() {
@@ -58,6 +65,110 @@ class GML_Translation_Content_Crawler {
 		if ( ! wp_next_scheduled( static::CRON_HOOK ) ) {
 			wp_schedule_event( time(), 'gml_every_two_minutes', static::CRON_HOOK );
 		}
+	}
+
+	/**
+	 * Remember a changed public page and discover only that page after the save
+	 * request has finished. This never calls AI or resumes a paused worker.
+	 */
+	public function remember_changed_post( $post_id, $post = null, $update = false ) {
+		unset( $update );
+		$post_id = (int) $post_id;
+		if ( $post_id <= 0 || wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) ) return;
+		if ( ! $post instanceof WP_Post ) $post = get_post( $post_id );
+		if ( ! $post instanceof WP_Post || $post->post_status !== 'publish' || $post->post_type === 'attachment' ) return;
+		$post_type = get_post_type_object( $post->post_type );
+		if ( ! $post_type || empty( $post_type->public ) ) return;
+		if ( ! class_exists( 'GML_Translation_State' ) || ! GML_Translation_State::multilingual_enabled() ) return;
+
+		$dirty = static::dirty_posts();
+		$dirty[ $post_id ] = 0;
+		if ( count( $dirty ) > static::MAX_DIRTY_POSTS ) {
+			$dirty = array_slice( $dirty, -static::MAX_DIRTY_POSTS, null, true );
+		}
+		update_option( static::DIRTY_POSTS_OPTION, $dirty, false );
+		if ( class_exists( 'GML_Translation_Readiness' ) ) GML_Translation_Readiness::clear_cache();
+		$this->schedule_incremental( 15 );
+	}
+
+	public function maybe_schedule_incremental() {
+		if ( ! is_admin() && ! wp_doing_cron() ) return;
+		if ( ! static::dirty_posts() ) return;
+		$this->schedule_incremental( 15 );
+	}
+
+	public function discover_changed_content() {
+		$dirty = static::dirty_posts();
+		if ( ! $dirty || ! static::ai_translation_available() || static::safety_paused() ) return;
+		if ( ! static::acquire_lock() ) {
+			$this->schedule_incremental( 60 );
+			return;
+		}
+
+		try {
+			$languages   = (array) get_option( 'gml_languages', [] );
+			$source_lang = static::normalize_language( get_option( 'gml_source_lang', 'en' ) );
+			$targets     = [];
+			foreach ( $languages as $language ) {
+				$target = static::normalize_language( $language['code'] ?? '' );
+				if ( $target !== '' && $target !== $source_lang && ( ! array_key_exists( 'enabled', $language ) || ! empty( $language['enabled'] ) ) ) {
+					$targets[] = $target;
+				}
+			}
+			if ( ! $targets ) {
+				delete_option( static::DIRTY_POSTS_OPTION );
+				return;
+			}
+
+			$parser     = new GML_HTML_Parser();
+			$translator = new GML_Translator();
+			$post_ids   = array_slice( array_keys( $dirty ), 0, static::INCREMENTAL_BATCH_SIZE );
+			foreach ( $post_ids as $post_id ) {
+				$post_id = (int) $post_id;
+				try {
+					$post = get_post( $post_id );
+					if ( $post instanceof WP_Post && $post->post_status === 'publish' ) {
+						$html = $this->fetch_rendered_html( $post );
+						if ( empty( $html ) ) $html = $this->build_post_html( $post );
+						if ( $html !== '' ) {
+							$parsed = $parser->parse( $html );
+							foreach ( $targets as $target ) $translator->discover( $parsed, $target );
+						}
+					}
+					unset( $dirty[ $post_id ] );
+				} catch ( \Throwable $e ) {
+					$dirty[ $post_id ] = (int) ( $dirty[ $post_id ] ?? 0 ) + 1;
+					if ( $dirty[ $post_id ] >= 3 ) unset( $dirty[ $post_id ] );
+					static::log_event( 'incremental_post_failed', $post_id );
+				}
+			}
+
+			if ( $dirty ) update_option( static::DIRTY_POSTS_OPTION, $dirty, false );
+			else delete_option( static::DIRTY_POSTS_OPTION );
+			update_option( 'gml_translation_incremental_last_activity', time(), false );
+			if ( class_exists( 'GML_Translation_Readiness' ) ) GML_Translation_Readiness::clear_cache();
+		} finally {
+			static::release_lock();
+		}
+
+		if ( static::dirty_posts() ) $this->schedule_incremental( 60 );
+	}
+
+	private function schedule_incremental( $delay ) {
+		if ( ! static::ai_translation_available() || static::safety_paused() ) return false;
+		if ( wp_next_scheduled( static::INCREMENTAL_CRON_HOOK ) ) return true;
+		$result = wp_schedule_single_event( time() + max( 5, (int) $delay ), static::INCREMENTAL_CRON_HOOK, [], true );
+		return $result && ! is_wp_error( $result );
+	}
+
+	private static function dirty_posts() {
+		$raw   = (array) get_option( static::DIRTY_POSTS_OPTION, [] );
+		$dirty = [];
+		foreach ( $raw as $post_id => $attempts ) {
+			$post_id = (int) $post_id;
+			if ( $post_id > 0 ) $dirty[ $post_id ] = max( 0, min( 3, (int) $attempts ) );
+		}
+		return $dirty;
 	}
 
 	public static function start_crawl() {

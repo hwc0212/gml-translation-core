@@ -4,7 +4,12 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 
 final class GML_Translation_Credentials {
     public static function option_name( $engine ) {
-        $options = [ 'gemini' => 'gml_api_key_encrypted', 'deepseek' => 'gml_deepseek_api_key_encrypted' ];
+        $options = [
+            'gemini'   => 'gml_api_key_encrypted',
+            'deepseek' => 'gml_deepseek_api_key_encrypted',
+            'qwen'     => 'gml_qwen_api_key_encrypted',
+            'openai'   => 'gml_openai_api_key_encrypted',
+        ];
         return is_string( $engine ) ? ( $options[ $engine ] ?? '' ) : '';
     }
 
