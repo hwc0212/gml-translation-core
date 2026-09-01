@@ -167,7 +167,7 @@ class GML_AI_HTTP_Transport {
             'message'     => self::redact( $message ),
             'status'      => (int) $status,
             'retryable'   => (bool) $retryable,
-            'retry_after' => max( 0, min( 5, (int) $retry_after ) ),
+            'retry_after' => max( 0, min( 3600, (int) $retry_after ) ),
         ];
     }
 
@@ -200,7 +200,7 @@ class GML_AI_HTTP_Transport {
         $value = function_exists( 'wp_remote_retrieve_header' )
             ? wp_remote_retrieve_header( $response, 'retry-after' )
             : '';
-        return is_numeric( $value ) ? max( 1, min( 5, (int) $value ) ) : 1;
+        return is_numeric( $value ) ? max( 1, min( 3600, (int) $value ) ) : 1;
     }
 
     private static function pause( $seconds ) {

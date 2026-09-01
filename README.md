@@ -35,6 +35,26 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.4.10 Failure Recovery And Readiness
+
+Provider failures are classified without changing the queue schema. HTTP 429,
+5xx, timeout and network failures return the current batch to pending without
+consuming item attempts, then use a bounded automatic cooldown while the
+recurring worker remains scheduled. Credential, permission, invalid-request and
+missing-model failures still open the manual safety circuit. Credentials and raw
+provider responses are redacted before diagnostics are stored or displayed.
+
+Successful connection tests acknowledge existing failed rows instead of deleting
+them. Administrators can distinguish later failures, review twenty recent rows,
+and retry one language in samples of at most 25. Explicit retry first reconciles
+rows whose translation already exists in memory, avoiding duplicate API work.
+
+Language-level SEO readiness now tolerates a small historical tail once stored
+coverage reaches 95 percent; each rendered page still requires all SEO-critical
+text and 95 percent of its own visible text. New queue discoveries invalidate
+readiness and rendered-page cache state. No tables, option names, translations,
+URLs, pause settings or API credentials are migrated or deleted.
+
 ## 0.4.9 Gemini Responses And Cache Confirmation
 
 The shared Gemini parser collects final text across parts, excludes thought

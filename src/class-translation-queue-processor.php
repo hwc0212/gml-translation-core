@@ -13,6 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 require_once __DIR__ . '/class-translation-queue-scope.php';
+require_once __DIR__ . '/class-translation-error.php';
 
 abstract class GML_Translation_Queue_Processor {
 
@@ -22,6 +23,7 @@ abstract class GML_Translation_Queue_Processor {
     const FAILURE_ACK_OPTION = 'gml_translation_failure_ack';
     const SAMPLE_OPTION = 'gml_translation_retry_sample_ids';
     const LOCK_OPTION = 'gml_translation_process_lock';
+    const BACKOFF_OPTION = 'gml_translation_provider_backoff';
     const LEGACY_FAILURE_THRESHOLD = 100;
     const RETRY_LIMIT = 25;
     const SINGLE_FALLBACK_LIMIT = 3;
@@ -105,6 +107,7 @@ abstract class GML_Translation_Queue_Processor {
             ! $this->translation_work_enabled() ||
             ! $this->ai_translation_available() ||
             static::circuit_is_open() ||
+            static::backoff_is_active() ||
             static::maybe_open_for_existing_failures()
         ) {
             return;
@@ -181,7 +184,8 @@ abstract class GML_Translation_Queue_Processor {
 					$wpdb->update( $queue_table, [
 						'status'        => 'failed',
 						'attempts'      => 3,
-						'error_message' => 'Source segment exceeds the translation size limit.',
+						'error_message' => GML_Translation_Error::stored_message( [ 'code' => 'source_too_large' ], 'Source segment exceeds the translation size limit.' ),
+						'processed_at'  => current_time( 'mysql' ),
 					], [ 'id' => (int) $item->id ] );
 					continue;
 				}
@@ -211,6 +215,12 @@ abstract class GML_Translation_Queue_Processor {
             try {
                 $translated = $api->translate_batch( $texts, $source, $target, $first_type );
             } catch ( Throwable $exception ) {
+                $diagnostic = static::provider_failure( $api, $exception->getMessage() );
+                if ( $diagnostic['category'] === 'transient' ) {
+                    $this->release_processing_items( $wpdb, $queue_table, $ids );
+                    static::register_backoff( $diagnostic, $api );
+                    return;
+                }
                 if ( static::is_provider_wide_failure( $exception->getMessage(), $api ) ) {
                     if ( $sample_ids ) {
                         $this->restore_sample_as_failed( $wpdb, $queue_table, $sample_ids, $exception->getMessage() );
@@ -234,6 +244,13 @@ abstract class GML_Translation_Queue_Processor {
                         $single = $api->translate_batch( [ $item->source_text ], $source, $target, $first_type );
                         $saved  = $this->save_translation_result( $wpdb, $queue_table, $item, $single[0] ?? null, $translator, $parser ) || $saved;
                     } catch ( Throwable $single_exception ) {
+                        $diagnostic = static::provider_failure( $api, $single_exception->getMessage() );
+                        if ( $diagnostic['category'] === 'transient' ) {
+                            $this->release_processing_items( $wpdb, $queue_table, $ids );
+                            static::register_backoff( $diagnostic, $api );
+                            if ( $saved ) static::invalidate_translation_state();
+                            return;
+                        }
                         if ( static::is_provider_wide_failure( $single_exception->getMessage(), $api ) ) {
                             if ( $sample_ids ) $this->restore_sample_as_failed( $wpdb, $queue_table, $sample_ids, $single_exception->getMessage() );
                             $this->release_processing_items( $wpdb, $queue_table, $ids );
@@ -243,7 +260,7 @@ abstract class GML_Translation_Queue_Processor {
                             ] );
                             return;
                         }
-                        $this->fail_or_retry_item( $wpdb, $queue_table, $item, $single_exception->getMessage() );
+                        $this->fail_or_retry_item( $wpdb, $queue_table, $item, $single_exception->getMessage(), $diagnostic );
                     }
                 }
                 $translated = null;
@@ -263,10 +280,8 @@ abstract class GML_Translation_Queue_Processor {
             }
 
             if ( $saved ) {
-                if ( class_exists( 'GML_Page_Cache' ) ) {
-                    GML_Page_Cache::invalidate();
-                }
-                static::clear_readiness_cache();
+                static::clear_backoff();
+                static::invalidate_translation_state();
             }
 
             if ( $sample_ids ) {
@@ -339,19 +354,20 @@ abstract class GML_Translation_Queue_Processor {
         $ids = array_values( array_filter( array_map( 'intval', $ids ) ) );
         if ( ! $ids ) return;
         $wpdb->query( $wpdb->prepare(
-            "UPDATE $table SET status = 'failed', attempts = 3, error_message = %s
+            "UPDATE $table SET status = 'failed', attempts = 3, error_message = %s, processed_at = %s
              WHERE status IN ('pending','processing') AND id IN (" . implode( ',', $ids ) . ')',
-            static::safe_error_message( $message )
+            GML_Translation_Error::stored_message( [], $message ),
+            current_time( 'mysql' )
         ) );
     }
 
     private function save_translation_result( $wpdb, $table, $item, $translated, $translator, $parser ) {
         if ( ! is_string( $translated ) || trim( $translated ) === '' ) {
-            $this->fail_or_retry_item( $wpdb, $table, $item, 'Empty translation result' );
+            $this->fail_or_retry_item( $wpdb, $table, $item, 'Empty translation result', [ 'code' => 'empty_result' ] );
             return false;
         }
         if ( ! $parser->verify_brand_protection( $item->source_text, $translated ) ) {
-            $this->fail_or_retry_item( $wpdb, $table, $item, 'Protected brand term changed or was removed' );
+            $this->fail_or_retry_item( $wpdb, $table, $item, 'Protected brand term changed or was removed', [ 'code' => 'protected_term' ] );
             return false;
         }
         try {
@@ -377,7 +393,7 @@ abstract class GML_Translation_Queue_Processor {
             return true;
         } catch ( Throwable $exception ) {
             unset( $exception );
-            $this->fail_or_retry_item( $wpdb, $table, $item, 'Local translation save failed' );
+            $this->fail_or_retry_item( $wpdb, $table, $item, 'Local translation save failed', [ 'code' => 'local_save_failed' ] );
 			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
 				error_log( 'GML: Local translation save failed for queue item #' . (int) $item->id . '.' );
 			}
@@ -385,12 +401,13 @@ abstract class GML_Translation_Queue_Processor {
         }
     }
 
-    private function fail_or_retry_item( $wpdb, $table, $item, $message ) {
+    private function fail_or_retry_item( $wpdb, $table, $item, $message, array $error = [] ) {
         $attempts = (int) $item->attempts + 1;
         $wpdb->update( $table, [
             'status'        => $attempts >= 3 ? 'failed' : 'pending',
             'attempts'      => $attempts,
-            'error_message' => static::safe_error_message( $message ),
+            'error_message' => GML_Translation_Error::stored_message( $error, $message ),
+            'processed_at'  => current_time( 'mysql' ),
         ], [ 'id' => $item->id ] );
     }
 
@@ -428,6 +445,7 @@ abstract class GML_Translation_Queue_Processor {
         }
         global $wpdb;
         $table = $wpdb->prefix . 'gml_queue';
+        static::reconcile_resolved_failures( $lang );
         $limit = max( 1, min( static::RETRY_LIMIT, null === $limit ? static::RETRY_LIMIT : (int) $limit ) );
         $ids   = $wpdb->get_col( $wpdb->prepare(
             "SELECT id FROM $table WHERE status = 'failed' AND target_lang = %s
@@ -465,9 +483,12 @@ abstract class GML_Translation_Queue_Processor {
     }
 
     public static function open_circuit( $message, array $context = [] ) {
+        $failure = GML_Translation_Error::classify( [], $message );
         update_option( static::CIRCUIT_OPTION, [
             'opened_at' => current_time( 'mysql' ),
             'message'   => static::safe_error_message( $message ),
+            'code'      => $failure['code'],
+            'category'  => $failure['category'],
             'engine'    => sanitize_key( $context['engine'] ?? '' ),
             'model'     => sanitize_text_field( $context['model'] ?? '' ),
         ], false );
@@ -479,22 +500,25 @@ abstract class GML_Translation_Queue_Processor {
     }
 
     public static function clear_circuit_breaker() {
-        if ( ! static::circuit_is_open() ) return false;
-        delete_option( static::CIRCUIT_OPTION );
-        update_option( static::FAILURE_ACK_OPTION, static::failed_count(), false );
+        $cleared = static::circuit_is_open() || (bool) get_option( static::BACKOFF_OPTION, false );
+        if ( static::circuit_is_open() ) delete_option( static::CIRCUIT_OPTION );
+        static::clear_backoff();
+        update_option( static::FAILURE_ACK_OPTION, [
+            'count' => static::failed_count(),
+            'at'    => current_time( 'mysql' ),
+        ], false );
         update_option( 'gml_translation_paused', true, false );
         static::clear_readiness_cache();
-        return true;
+        return $cleared;
     }
 
     public static function maybe_open_for_existing_failures() {
         if ( static::circuit_is_open() ) return true;
-        $failed = static::failed_count();
-        $ack    = max( 0, (int) get_option( static::FAILURE_ACK_OPTION, 0 ) );
-        if ( $failed - $ack < static::LEGACY_FAILURE_THRESHOLD ) return false;
+        $counts = static::get_failure_counts();
+        if ( $counts['new'] < static::LEGACY_FAILURE_THRESHOLD ) return false;
         static::open_circuit( sprintf(
             __( 'Translation paused for safety: %d failed items require provider verification and a limited retry sample.', static::TEXT_DOMAIN ),
-            $failed
+            $counts['new']
         ) );
         return true;
     }
@@ -505,22 +529,15 @@ abstract class GML_Translation_Queue_Processor {
     }
 
     public static function is_provider_wide_failure( $message, $provider = null ) {
-        $error = is_object( $provider ) && method_exists( $provider, 'get_last_error' ) ? $provider->get_last_error() : [];
-        $code  = sanitize_key( is_array( $error ) ? ( $error['code'] ?? '' ) : '' );
-        if ( in_array( $code, [
-            'provider_not_configured', 'unsafe_endpoint', 'network_error', 'bad_request',
-            'authentication_error', 'not_found', 'rate_limited', 'provider_unavailable',
-            'invalid_json', 'timeout', 'empty_response', 'incomplete_response',
-        ], true ) ) {
-            return true;
-        }
+        $failure = static::provider_failure( $provider, $message );
+        if ( $failure['category'] === 'configuration' ) return true;
 
         $message = strtolower( (string) $message );
         if ( $message === '' || strpos( $message, 'prompt blocked:' ) !== false ) return false;
         foreach ( [
-            'api key not configured', 'api http ', ' api error:', 'rate limit', 'quota', 'unauthorized',
+            'api key not configured', ' api error:', 'unauthorized',
             'forbidden', 'authentication', 'invalid api key', 'model not found',
-            'model is no longer available', 'no text in ',
+            'model is no longer available',
         ] as $pattern ) {
             if ( strpos( $message, $pattern ) !== false ) return true;
         }
@@ -540,10 +557,113 @@ abstract class GML_Translation_Queue_Processor {
         if ( $lang !== '' ) {
             $where .= $wpdb->prepare( ' AND target_lang = %s', sanitize_key( $lang ) );
         }
-        return $wpdb->get_results(
+        $rows = $wpdb->get_results(
             "SELECT error_message, COUNT(*) AS item_count FROM $table $where
-             GROUP BY error_message ORDER BY item_count DESC LIMIT $limit"
+             GROUP BY error_message ORDER BY item_count DESC LIMIT 100"
         );
+        $groups = [];
+        foreach ( (array) $rows as $row ) {
+            $failure = GML_Translation_Error::classify( [], $row->error_message );
+            $code = $failure['code'];
+            if ( ! isset( $groups[ $code ] ) ) {
+                $groups[ $code ] = (object) [
+                    'error_code' => $code, 'category' => $failure['category'],
+                    'error_message' => GML_Translation_Error::label( $code ), 'item_count' => 0,
+                ];
+            }
+            $groups[ $code ]->item_count += (int) $row->item_count;
+        }
+        usort( $groups, static function( $a, $b ) { return $b->item_count <=> $a->item_count; } );
+        return array_slice( $groups, 0, $limit );
+    }
+
+    public static function get_failure_counts() {
+        $failed = static::failed_count();
+        $ack = get_option( static::FAILURE_ACK_OPTION, 0 );
+        if ( is_array( $ack ) && ! empty( $ack['at'] ) ) {
+            global $wpdb;
+            $table = $wpdb->prefix . 'gml_queue';
+            $new = (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM $table WHERE status='failed' AND processed_at >= %s",
+                sanitize_text_field( $ack['at'] )
+            ) );
+            $acknowledged = max( 0, $failed - $new );
+        } else {
+            $acknowledged = min( $failed, max( 0, (int) $ack ) );
+        }
+        return [ 'total' => $failed, 'acknowledged' => $acknowledged, 'new' => max( 0, $failed - $acknowledged ) ];
+    }
+
+    public static function get_failure_details( $lang = '', $limit = 20 ) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'gml_queue';
+        $limit = max( 1, min( 50, (int) $limit ) );
+        $where = "WHERE status='failed'";
+        if ( $lang !== '' ) $where .= $wpdb->prepare( ' AND target_lang=%s', sanitize_key( $lang ) );
+        $rows = $wpdb->get_results( "SELECT id, source_text, target_lang, context_type, attempts, error_message, created_at, processed_at FROM $table $where ORDER BY COALESCE(processed_at,created_at) DESC, id DESC LIMIT $limit" );
+        foreach ( (array) $rows as $row ) {
+            $failure = GML_Translation_Error::classify( [], $row->error_message );
+            $row->error_code = $failure['code'];
+            $row->error_label = GML_Translation_Error::label( $failure['code'] );
+            $row->category = $failure['category'];
+            $row->safe_message = $failure['message'];
+        }
+        return $rows;
+    }
+
+    public static function get_backoff() {
+        $value = get_option( static::BACKOFF_OPTION, [] );
+        return is_array( $value ) ? $value : [];
+    }
+
+    public static function backoff_is_active() {
+        $value = static::get_backoff();
+        if ( ! $value || (int) ( $value['until'] ?? 0 ) <= time() ) {
+            if ( $value ) static::clear_backoff();
+            return false;
+        }
+        return true;
+    }
+
+    private static function register_backoff( array $failure, $provider ) {
+        $previous = static::get_backoff();
+        $count = ( $previous['code'] ?? '' ) === $failure['code'] ? min( 8, (int) ( $previous['count'] ?? 0 ) + 1 ) : 1;
+        $base = max( $failure['retry_after'], min( 3600, 60 * ( 2 ** ( $count - 1 ) ) ) );
+        $delay = min( 3600, $base + wp_rand( 0, min( 30, max( 1, (int) floor( $base / 4 ) ) ) ) );
+        update_option( static::BACKOFF_OPTION, [
+            'code' => $failure['code'], 'message' => $failure['message'], 'count' => $count, 'until' => time() + $delay,
+            'engine' => is_object( $provider ) && method_exists( $provider, 'get_engine' ) ? sanitize_key( $provider->get_engine() ) : '',
+            'model' => is_object( $provider ) && method_exists( $provider, 'get_model' ) ? sanitize_text_field( $provider->get_model() ) : '',
+        ], false );
+    }
+
+    private static function clear_backoff() {
+        delete_option( static::BACKOFF_OPTION );
+    }
+
+    private static function provider_failure( $provider, $message ) {
+        $error = is_object( $provider ) && method_exists( $provider, 'get_last_error' ) ? $provider->get_last_error() : [];
+        return GML_Translation_Error::classify( $error, $message );
+    }
+
+    private static function invalidate_translation_state() {
+        if ( class_exists( 'GML_Page_Cache' ) ) GML_Page_Cache::invalidate();
+        static::clear_readiness_cache();
+    }
+
+    private static function reconcile_resolved_failures( $lang ) {
+        global $wpdb;
+        $queue = $wpdb->prefix . 'gml_queue';
+        $index = $wpdb->prefix . 'gml_index';
+        $where = $wpdb->prepare( 'q.target_lang=%s', sanitize_key( $lang ) );
+        $updated = (int) $wpdb->query(
+            "UPDATE $queue q INNER JOIN $index i
+             ON i.source_hash=q.source_hash AND i.source_lang=q.source_lang AND i.target_lang=q.target_lang
+             SET q.status='completed', q.error_message=NULL, q.processed_at=NOW()
+             WHERE q.status='failed' AND $where AND i.status IN ('auto','manual')"
+        );
+        if ( $updated ) static::clear_readiness_cache();
+        return $updated;
     }
 
     public static function clear_readiness_cache( $lang = '' ) {

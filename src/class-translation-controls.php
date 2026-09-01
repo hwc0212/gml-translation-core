@@ -163,12 +163,14 @@ class GML_Translation_Controls {
             && ( $last['token'] ?? '' ) === ( $lock['token'] ?? '' );
         if ( ! GML_Translation_State::multilingual_enabled() || ! GML_Translation_State::ai_available() ) $state = 'unavailable';
         elseif ( GML_Queue_Processor::circuit_is_open() ) $state = 'safety_paused';
+        elseif ( GML_Queue_Processor::backoff_is_active() ) $state = 'waiting';
         elseif ( $paused ) $state = $active ? 'pausing' : 'paused';
         elseif ( $active ) $state = 'processing';
         elseif ( ! $pending ) $state = 'idle';
         elseif ( ! $next ) $state = 'not_scheduled';
         elseif ( $next < time() - 120 ) $state = 'overdue';
         else $state = 'scheduled';
-        return [ 'state' => $state, 'last_activity' => (int) ( $last['finished'] ?? $last['started'] ?? 0 ), 'next_run' => $next ?: 0 ];
+        $backoff = GML_Queue_Processor::get_backoff();
+        return [ 'state' => $state, 'last_activity' => (int) ( $last['finished'] ?? $last['started'] ?? 0 ), 'next_run' => $next ?: 0, 'retry_after' => (int) ( $backoff['until'] ?? 0 ) ];
     }
 }

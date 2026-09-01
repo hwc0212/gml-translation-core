@@ -15,6 +15,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Translation_Readiness {
 
+    const MIN_LANGUAGE_COVERAGE = 0.95;
+
     /** @var array<string,bool>|null */
     private static $map = null;
 
@@ -77,7 +79,10 @@ class GML_Translation_Readiness {
 
         self::$map = [];
         foreach ( array_unique( array_merge( array_keys( $translated ), array_keys( $incomplete ) ) ) as $code ) {
-            self::$map[ $code ] = ! empty( $translated[ $code ] ) && empty( $incomplete[ $code ] );
+            $done = (int) ( $translated[ $code ] ?? 0 );
+            $left = (int) ( $incomplete[ $code ] ?? 0 );
+            self::$map[ $code ] = $done > 0
+                && ( $done / max( 1, $done + $left ) ) >= self::MIN_LANGUAGE_COVERAGE;
         }
         wp_cache_set( 'gml_readiness_map', self::$map, 'gml_translate', 60 );
         return self::$map;

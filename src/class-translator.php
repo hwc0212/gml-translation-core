@@ -75,6 +75,7 @@ class GML_Translation_Translator {
 
     private function enqueue_missing( array $uncached, $source_lang, $target_lang ) {
         global $wpdb;
+        $inserted = 0;
         $lock = self::enqueue_lock_name( $source_lang, $target_lang );
         // Legacy queues lack a unique key. Never wait on a competing page request.
         if ( (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 0)', $lock ) ) !== 1 ) return;
@@ -115,9 +116,14 @@ class GML_Translation_Translator {
                     $this->calculate_priority( $item['text'], $item['context_type'] ),
                     $now
                 ) );
+                $inserted += max( 0, (int) $wpdb->rows_affected );
             }
         } finally {
             $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+        }
+        if ( $inserted ) {
+            if ( class_exists( 'GML_Translation_Readiness' ) ) GML_Translation_Readiness::clear_cache();
+            if ( class_exists( 'GML_Page_Cache' ) ) GML_Page_Cache::invalidate();
         }
     }
 

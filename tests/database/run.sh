@@ -19,6 +19,7 @@ php "$ROOT/enqueue.php" verify
 php "$ROOT/controls.php"
 php "$ROOT/cache-confirmation.php"
 php "$ROOT/gemini-response.php"
+php "$ROOT/failure-recovery.php"
 php "$ROOT/seo-connection.php"
 php "$ROOT/sample-resume.php"
 php "$ROOT/sample-schedule.php"
