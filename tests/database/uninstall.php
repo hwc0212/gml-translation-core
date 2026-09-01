@@ -21,17 +21,26 @@ $cache   = trailingslashit( $uploads['basedir'] ) . 'gml-cache';
 wp_mkdir_p( $cache );
 file_put_contents( $cache . '/fixture.html', 'cached' );
 
-GML_Translation_Uninstaller::cleanup_runtime();
+GML_Translation_Uninstaller::uninstall( 'gml_translate_uninstall_delete_data', false );
 
-gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $index ) ) === $index, 'runtime cleanup preserves the translation memory table' );
-gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $queue ) ) === $queue, 'runtime cleanup preserves the translation queue table' );
-gml_db_assert( get_option( 'gml_source_lang' ) === 'en', 'runtime cleanup preserves translation settings' );
-gml_db_assert( wp_next_scheduled( 'gml_process_queue', [ 'fixture' ] ) === false, 'runtime cleanup removes scheduled jobs with arguments' );
-gml_db_assert( get_transient( 'gml_page_uninstall_fixture' ) === false, 'runtime cleanup removes rendered page cache' );
-gml_db_assert( ! file_exists( $cache ), 'runtime cleanup removes the dedicated uploads cache directory' );
+gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $index ) ) === $index, 'default uninstall preserves the translation memory table' );
+gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $queue ) ) === $queue, 'default uninstall preserves the translation queue table' );
+gml_db_assert( get_option( 'gml_source_lang' ) === 'en', 'default uninstall preserves translation settings' );
+gml_db_assert( wp_next_scheduled( 'gml_process_queue', [ 'fixture' ] ) === false, 'default uninstall removes scheduled jobs with arguments' );
+gml_db_assert( get_transient( 'gml_page_uninstall_fixture' ) === false, 'default uninstall removes rendered page cache' );
+gml_db_assert( ! file_exists( $cache ), 'default uninstall removes the dedicated uploads cache directory' );
 
 update_option( 'gml_translate_uninstall_delete_data', 1, false );
-GML_Translation_Uninstaller::delete_site_data();
+set_transient( 'gml_page_companion_fixture', 'protected', HOUR_IN_SECONDS );
+wp_schedule_single_event( time() + HOUR_IN_SECONDS, 'gml_process_queue', [ 'companion' ] );
+GML_Translation_Uninstaller::uninstall( 'gml_translate_uninstall_delete_data', true );
+
+gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $index ) ) === $index, 'installed companion protects the translation memory table' );
+gml_db_assert( get_option( 'gml_source_lang' ) === 'en', 'installed companion protects translation settings' );
+gml_db_assert( wp_next_scheduled( 'gml_process_queue', [ 'companion' ] ) !== false, 'installed companion keeps the shared runtime scheduled' );
+gml_db_assert( get_transient( 'gml_page_companion_fixture' ) === 'protected', 'installed companion keeps the shared rendered cache' );
+
+GML_Translation_Uninstaller::uninstall( 'gml_translate_uninstall_delete_data', false );
 
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $index ) ) !== $index, 'complete removal drops the translation memory table' );
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $queue ) ) !== $queue, 'complete removal drops the translation queue table' );
