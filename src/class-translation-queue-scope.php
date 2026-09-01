@@ -14,6 +14,7 @@ class GML_Translation_Queue_Scope {
     public static function enabled_languages() {
         $codes = [];
         foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
+            if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $language ) ) continue;
             if ( ! empty( $language['code'] ) && ( ! isset( $language['enabled'] ) || $language['enabled'] ) ) $codes[] = sanitize_key( $language['code'] );
         }
         return array_values( array_unique( $codes ) );
@@ -23,6 +24,7 @@ class GML_Translation_Queue_Scope {
         if ( ! self::normal_enabled() ) return [];
         $codes = [];
         foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
+            if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $language ) ) continue;
             if ( ! empty( $language['code'] ) && empty( $language['paused'] ) && ( ! isset( $language['enabled'] ) || $language['enabled'] ) ) $codes[] = sanitize_key( $language['code'] );
         }
         return array_values( array_unique( $codes ) );
@@ -37,7 +39,10 @@ class GML_Translation_Queue_Scope {
         global $wpdb;
         $lang = $wpdb->get_var( $wpdb->prepare( "SELECT target_lang FROM {$wpdb->prefix}gml_queue WHERE id = %d", (int) reset( $ids ) ) );
         foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
-            if ( ( $language['code'] ?? '' ) === $lang ) return ! empty( $language['paused'] );
+            if ( ( $language['code'] ?? '' ) === $lang ) {
+                if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $language ) ) return true;
+                return ! empty( $language['paused'] );
+            }
         }
         return true;
     }

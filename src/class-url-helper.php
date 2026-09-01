@@ -78,11 +78,18 @@ class GML_URL_Helper {
     }
 
     public static function get_language_url( $url_or_path, $lang, $source_lang, $languages ) {
+        if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $lang ) ) {
+            return self::get_external_language_url( $url_or_path, $lang );
+        }
+
         $parsed = wp_parse_url( $url_or_path );
         $path   = is_array( $parsed ) && isset( $parsed['path'] ) ? $parsed['path'] : (string) $url_or_path;
         $query  = is_array( $parsed ) && isset( $parsed['query'] ) ? $parsed['query'] : '';
 
-        $path = self::strip_language_prefix( $path ?: '/', $languages );
+        $local_languages = class_exists( 'GML_Language_Utils' )
+            ? GML_Language_Utils::local_configured_codes( true, false )
+            : $languages;
+        $path = self::strip_language_prefix( $path ?: '/', $local_languages );
         $path = strtok( $path, '?' );
         $path = '/' . ltrim( $path, '/' );
         if ( $lang !== $source_lang ) {
@@ -92,6 +99,96 @@ class GML_URL_Helper {
         $url = home_url( $path );
         if ( $query !== '' ) {
             $url .= '?' . $query;
+        }
+        return $url;
+    }
+
+    /**
+     * Build a switcher URL for a language hosted by another website.
+     *
+     * The default same-path mode maps /products/item/ to the configured
+     * external base URL. Homepage mode always links to the external homepage.
+     * Query strings and fragments are intentionally not copied across domains.
+     */
+    public static function get_external_language_url( $url_or_path, $lang ) {
+        if ( ! class_exists( 'GML_Language_Utils' ) ) {
+            return '';
+        }
+
+        $language = GML_Language_Utils::get_language_config( $lang );
+        $base_url = GML_Language_Utils::get_external_site_url( $language );
+        if ( ! $base_url ) {
+            return '';
+        }
+
+        if ( GML_Language_Utils::get_external_path_mode( $language ) === GML_Language_Utils::EXTERNAL_PATH_HOMEPAGE ) {
+            $mapped_url = $base_url;
+        } else {
+            $parsed = wp_parse_url( $url_or_path );
+            $path   = is_array( $parsed ) && isset( $parsed['path'] ) ? $parsed['path'] : (string) $url_or_path;
+            $path   = self::strip_language_prefix(
+                $path ?: '/',
+                GML_Language_Utils::local_configured_codes( true, false )
+            );
+            $path       = strtok( self::strip_home_path( $path ), '?' );
+            $mapped_url = untrailingslashit( $base_url ) . '/' . ltrim( $path ?: '/', '/' );
+        }
+
+        /**
+         * Filter a mapped external language URL for installations with manual
+         * slug mappings. The filtered URL must remain on the configured origin.
+         */
+        $filtered = apply_filters( 'gml_external_language_url', $mapped_url, $lang, $url_or_path, $language );
+        return self::validate_external_mapped_url( $filtered, $base_url ) ?: $mapped_url;
+    }
+
+    /**
+     * Return an external alternate URL suitable for hreflang and sitemap use.
+     * Homepage-only external sites are not advertised as equivalents of every
+     * inner page because that would send conflicting SEO signals.
+     */
+    public static function get_external_hreflang_url( $url_or_path, $lang ) {
+        if ( ! class_exists( 'GML_Language_Utils' ) ) {
+            return '';
+        }
+        $language = GML_Language_Utils::get_language_config( $lang );
+        if (
+            GML_Language_Utils::get_external_path_mode( $language ) === GML_Language_Utils::EXTERNAL_PATH_HOMEPAGE
+            && ! self::is_home_url( $url_or_path )
+        ) {
+            return '';
+        }
+        return self::get_external_language_url( $url_or_path, $lang );
+    }
+
+    public static function is_home_url( $url_or_path ) {
+        $parsed = wp_parse_url( $url_or_path );
+        $path   = is_array( $parsed ) && isset( $parsed['path'] ) ? $parsed['path'] : (string) $url_or_path;
+        $codes  = class_exists( 'GML_Language_Utils' )
+            ? GML_Language_Utils::local_configured_codes( true, false )
+            : [];
+        $path = self::strip_language_prefix( $path ?: '/', $codes );
+        $path = strtok( self::strip_home_path( $path ), '?' );
+        return trim( (string) $path, '/' ) === '';
+    }
+
+    private static function validate_external_mapped_url( $url, $base_url ) {
+        $url       = esc_url_raw( (string) $url, [ 'https' ] );
+        $parts     = wp_parse_url( $url );
+        $base      = wp_parse_url( $base_url );
+        $port      = static function( $parsed ) {
+            return isset( $parsed['port'] ) ? (int) $parsed['port'] : 443;
+        };
+        if (
+            ! is_array( $parts )
+            || ! is_array( $base )
+            || strtolower( (string) ( $parts['scheme'] ?? '' ) ) !== 'https'
+            || strtolower( (string) ( $parts['host'] ?? '' ) ) !== strtolower( (string) ( $base['host'] ?? '' ) )
+            || $port( $parts ) !== $port( $base )
+            || isset( $parts['user'] )
+            || isset( $parts['pass'] )
+        ) {
+            return '';
         }
         return $url;
     }

@@ -8,7 +8,7 @@ require_once __DIR__ . '/class-language-utils.php';
 class GML_Translation_Rewrite {
     public static function rules() {
         if ( ! GML_Translation_State::multilingual_enabled() ) return [];
-        $pattern = GML_Language_Utils::language_pattern( GML_Language_Utils::enabled_target_codes() );
+        $pattern = GML_Language_Utils::language_pattern( GML_Language_Utils::enabled_local_target_codes() );
         if ( $pattern === '' ) return [];
         return [
             "^({$pattern})/(.+?)/?$" => 'index.php?gml_lang=$matches[1]&gml_path=$matches[2]',

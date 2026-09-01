@@ -520,7 +520,7 @@ class GML_Translation_Output_Buffer {
 
         // Build language code pattern for detecting existing prefixes.
         $all_langs = class_exists( 'GML_Language_Utils' )
-            ? GML_Language_Utils::configured_codes( true, false )
+            ? GML_Language_Utils::local_configured_codes( true, false )
             : array_unique( array_merge( [ get_option( 'gml_source_lang', 'en' ) ], array_column( get_option( 'gml_languages', [] ), 'code' ) ) );
         $lang_pattern = class_exists( 'GML_Language_Utils' )
             ? GML_Language_Utils::language_pattern( $all_langs )
@@ -800,7 +800,11 @@ class GML_Translation_Output_Buffer {
     protected function is_enabled_language( $lang ) {
         $configured = get_option( 'gml_languages', [] );
         foreach ( $configured as $l ) {
-            if ( ( $l['enabled'] ?? true ) && $l['code'] === $lang ) {
+            if (
+                ( $l['enabled'] ?? true )
+                && $l['code'] === $lang
+                && ( ! class_exists( 'GML_Language_Utils' ) || ! GML_Language_Utils::is_external_language( $l ) )
+            ) {
                 return true;
             }
         }

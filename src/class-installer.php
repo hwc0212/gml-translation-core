@@ -169,6 +169,8 @@ class GML_Installer {
             'gml_switcher_flag_type'   => 'rectangle',
             'gml_switcher_show_names'  => true,
             'gml_switcher_use_fullname' => true,
+            'gml_switcher_appearance'  => 'inherit',
+            'gml_switcher_panel_alignment' => 'auto',
             'gml_switcher_position'    => 'none',
             'gml_translation_enabled'  => false,
             'gml_multilingual_enabled' => $legacy_enabled,
@@ -282,6 +284,7 @@ class GML_Installer {
                 'flag'        => $info['flag'],
                 'country'     => $info['country'],
                 'url_prefix'  => '/' . $code . '/',
+                'site_mode'   => 'local',
                 'enabled'     => true,
             ];
         }

@@ -110,6 +110,7 @@ class GML_Translation_Content_Crawler {
 			$source_lang = static::normalize_language( get_option( 'gml_source_lang', 'en' ) );
 			$targets     = [];
 			foreach ( $languages as $language ) {
+				if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $language ) ) continue;
 				$target = static::normalize_language( $language['code'] ?? '' );
 				if ( $target !== '' && $target !== $source_lang && ( ! array_key_exists( 'enabled', $language ) || ! empty( $language['enabled'] ) ) ) {
 					$targets[] = $target;
@@ -303,6 +304,7 @@ class GML_Translation_Content_Crawler {
 
 				$parsed = $parser->parse( $html );
 				foreach ( $languages as $language ) {
+					if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $language ) ) continue;
 					$target = static::normalize_language( $language['code'] ?? '' );
 					if (
 						$target === '' ||

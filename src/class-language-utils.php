@@ -11,6 +11,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Language_Utils {
 
+    const SITE_MODE_LOCAL    = 'local';
+    const SITE_MODE_EXTERNAL = 'external';
+
+    const EXTERNAL_PATH_SAME     = 'same_path';
+    const EXTERNAL_PATH_HOMEPAGE = 'homepage';
+
     /**
      * Normalize language codes used in URL prefixes.
      *
@@ -57,10 +63,137 @@ class GML_Language_Utils {
     }
 
     /**
+     * Return configured local language codes. External language sites must
+     * never be interpreted as URL prefixes on this WordPress installation.
+     */
+    public static function local_configured_codes( $include_source = true, $enabled_only = false ) {
+        $codes = [];
+        if ( $include_source ) {
+            $source = self::normalize_code( get_option( 'gml_source_lang', 'en' ) );
+            if ( $source ) {
+                $codes[] = $source;
+            }
+        }
+
+        foreach ( (array) get_option( 'gml_languages', [] ) as $lang ) {
+            if ( self::is_external_language( $lang ) ) {
+                continue;
+            }
+            if ( $enabled_only && isset( $lang['enabled'] ) && ! $lang['enabled'] ) {
+                continue;
+            }
+            $code = self::normalize_code( $lang['code'] ?? '' );
+            if ( $code ) {
+                $codes[] = $code;
+            }
+        }
+
+        $codes = array_values( array_unique( $codes ) );
+        usort( $codes, static function( $a, $b ) {
+            return strlen( $b ) <=> strlen( $a );
+        } );
+        return $codes;
+    }
+
+    /**
+     * Return the stored configuration for one target language.
+     */
+    public static function get_language_config( $code ) {
+        $code = self::normalize_code( $code );
+        if ( ! $code ) {
+            return null;
+        }
+        foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
+            if ( self::normalize_code( $language['code'] ?? '' ) === $code ) {
+                return is_array( $language ) ? $language : null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether a target language is served by another website.
+     *
+     * Missing mode values remain local for full backward compatibility.
+     */
+    public static function is_external_language( $language ) {
+        if ( ! is_array( $language ) ) {
+            $language = self::get_language_config( $language );
+        }
+        return is_array( $language )
+            && ( $language['site_mode'] ?? self::SITE_MODE_LOCAL ) === self::SITE_MODE_EXTERNAL;
+    }
+
+    /**
+     * Return a validated external site base URL, always with one trailing slash.
+     */
+    public static function get_external_site_url( $language ) {
+        if ( ! is_array( $language ) ) {
+            $language = self::get_language_config( $language );
+        }
+        if ( ! self::is_external_language( $language ) ) {
+            return '';
+        }
+        return self::sanitize_external_site_url( $language['external_url'] ?? '' );
+    }
+
+    /**
+     * Validate an external language site URL. Public language links are HTTPS
+     * only and cannot contain credentials, query strings, or fragments.
+     */
+    public static function sanitize_external_site_url( $url ) {
+        $url = trim( (string) $url );
+        if ( $url === '' ) {
+            return '';
+        }
+
+        $url   = esc_url_raw( $url, [ 'https' ] );
+        $parts = wp_parse_url( $url );
+        if (
+            ! is_array( $parts )
+            || strtolower( (string) ( $parts['scheme'] ?? '' ) ) !== 'https'
+            || empty( $parts['host'] )
+            || isset( $parts['user'] )
+            || isset( $parts['pass'] )
+            || isset( $parts['query'] )
+            || isset( $parts['fragment'] )
+        ) {
+            return '';
+        }
+
+        $home = wp_parse_url( home_url( '/' ) );
+        if (
+            is_array( $home )
+            && ! empty( $home['host'] )
+            && strtolower( (string) $home['host'] ) === strtolower( (string) $parts['host'] )
+        ) {
+            return '';
+        }
+
+        return trailingslashit( untrailingslashit( $url ) );
+    }
+
+    public static function get_external_path_mode( $language ) {
+        if ( ! is_array( $language ) ) {
+            $language = self::get_language_config( $language );
+        }
+        return is_array( $language ) && ( $language['external_path_mode'] ?? '' ) === self::EXTERNAL_PATH_HOMEPAGE
+            ? self::EXTERNAL_PATH_HOMEPAGE
+            : self::EXTERNAL_PATH_SAME;
+    }
+
+    /**
      * Return enabled target language codes only.
      */
     public static function enabled_target_codes() {
         return self::configured_codes( false, true );
+    }
+
+    /**
+     * Return enabled target languages served by this WordPress installation.
+     */
+    public static function enabled_local_target_codes() {
+        return self::local_configured_codes( false, true );
     }
 
     /**
@@ -85,7 +218,7 @@ class GML_Language_Utils {
         if ( $path === '' ) {
             return '';
         }
-        $codes = self::configured_codes( true, $enabled_only );
+        $codes = self::local_configured_codes( true, $enabled_only );
         if ( class_exists( 'GML_URL_Helper' ) ) {
             return self::normalize_code( GML_URL_Helper::detect_language( $path, $codes ) );
         }
@@ -101,7 +234,7 @@ class GML_Language_Utils {
      * Strip a configured language prefix from a path.
      */
     public static function strip_prefix_from_path( $path, $enabled_only = false ) {
-        $codes = self::configured_codes( true, $enabled_only );
+        $codes = self::local_configured_codes( true, $enabled_only );
         if ( class_exists( 'GML_URL_Helper' ) ) {
             return GML_URL_Helper::strip_language_prefix( $path, $codes );
         }

@@ -54,7 +54,11 @@ class GML_Translation_Provider implements GML_Translation_Provider_Interface {
             if ( $lang === $source || ! $this->is_index_ready( $lang ) ) {
                 continue;
             }
-            $translated_url = $this->get_translated_url( $source_url, $lang );
+            $translated_url = class_exists( 'GML_Language_Utils' )
+                && GML_Language_Utils::is_external_language( $lang )
+                && class_exists( 'GML_URL_Helper' )
+                ? GML_URL_Helper::get_external_hreflang_url( $source_url, $lang )
+                : $this->get_translated_url( $source_url, $lang );
             if ( $translated_url ) {
                 $alternates[ $this->get_hreflang_code( $lang ) ] = $translated_url;
             }
@@ -175,6 +179,10 @@ class GML_Translation_Provider implements GML_Translation_Provider_Interface {
 
     private function is_index_ready( $lang ) {
         if ( array_key_exists( $lang, $this->readiness ) ) {
+            return $this->readiness[ $lang ];
+        }
+        if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $lang ) ) {
+            $this->readiness[ $lang ] = GML_Language_Utils::get_external_site_url( $lang ) !== '';
             return $this->readiness[ $lang ];
         }
         if ( class_exists( 'GML_Queue_Processor' ) && method_exists( 'GML_Queue_Processor', 'language_is_index_ready' ) ) {

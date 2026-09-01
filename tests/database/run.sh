@@ -30,6 +30,7 @@ php "$ROOT/token-efficiency.php"
 php "$ROOT/credentials.php"
 php "$ROOT/credentials-admin.php"
 php "$ROOT/provider-adapters.php"
+php "$ROOT/external-language-sites.php"
 php "$ROOT/queue-fairness.php"
 for scenario in resume breaker sample schedule queue-schedule no-key unauthorized nonce; do
     php "$ROOT/crawl.php" "$scenario"

@@ -35,6 +35,19 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.5.0 External Language Sites
+
+A target language can now be served by an independent HTTPS website. External
+languages remain available to the language provider, switcher, and hreflang
+adapter, while local rewrite rules, output translation, crawling, and AI queue
+selection explicitly ignore them. Missing `site_mode` values remain local, so
+existing language configuration and translation data require no migration.
+
+Same-path mapping preserves the source page path but never copies query strings
+or credentials to the other domain. Homepage-only mapping is available when URL
+structures differ; it is intentionally omitted from inner-page hreflang output
+to avoid declaring unrelated pages as equivalents. No remote request is made.
+
 ## 0.4.11 Incremental Sync And Token Efficiency
 
 Saving a published public post now records a bounded dirty-object marker and

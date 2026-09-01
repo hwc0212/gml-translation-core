@@ -41,6 +41,10 @@ class GML_Translation_Controls {
         $found = false;
         $isolated_start = get_option( 'gml_translation_paused', false ) || ! GML_Translation_Queue_Scope::normal_enabled();
         foreach ( $languages as &$language ) {
+            if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $language ) ) {
+                $language['paused'] = true;
+                continue;
+            }
             if ( $lang !== '' && $isolated_start ) $language['paused'] = true;
             if ( ( ! isset( $language['enabled'] ) || $language['enabled'] ) && ( $lang === '' || ( $language['code'] ?? '' ) === $lang ) ) {
                 $language['paused'] = false;
@@ -71,7 +75,11 @@ class GML_Translation_Controls {
         if ( count( $targets ) !== 1 ) return $state;
         $state['language'] = $targets[0];
         foreach ( (array) get_option( 'gml_languages', [] ) as $language ) {
-            if ( ( $language['code'] ?? '' ) === $state['language'] && ( ! isset( $language['enabled'] ) || $language['enabled'] ) ) {
+            if (
+                ( $language['code'] ?? '' ) === $state['language']
+                && ( ! isset( $language['enabled'] ) || $language['enabled'] )
+                && ( ! class_exists( 'GML_Language_Utils' ) || ! GML_Language_Utils::is_external_language( $language ) )
+            ) {
                 $state['valid'] = true;
             }
         }
@@ -125,6 +133,9 @@ class GML_Translation_Controls {
         $languages = (array) get_option( 'gml_languages', [] );
         foreach ( $languages as &$language ) {
             if ( ( $language['code'] ?? '' ) === $lang ) {
+                if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $language ) ) {
+                    return new WP_Error( 'external_language', 'External language sites do not use this translation queue.' );
+                }
                 $language['paused'] = true;
                 update_option( 'gml_languages', $languages );
                 if ( ! GML_Translation_Queue_Scope::has_work_scope() ) GML_Queue_Processor::unschedule_cron();

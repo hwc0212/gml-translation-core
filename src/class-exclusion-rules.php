@@ -142,8 +142,11 @@ class GML_Exclusion_Rules {
         return update_option( 'gml_exclusion_rules', $sanitized, false );
     }
 
-    private function get_all_language_codes() {
-        $source = get_option( 'gml_source_lang', 'en' );
+	private function get_all_language_codes() {
+		if ( class_exists( 'GML_Language_Utils' ) ) {
+			return GML_Language_Utils::local_configured_codes( true, false );
+		}
+		$source = get_option( 'gml_source_lang', 'en' );
         $codes  = [ $source ];
         foreach ( get_option( 'gml_languages', [] ) as $lang ) {
 			if ( ! empty( $lang['code'] ) ) $codes[] = $lang['code'];
