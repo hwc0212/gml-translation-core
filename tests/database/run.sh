@@ -66,4 +66,5 @@ for home in http://gml-regression.test http://gml-regression.test/ygnaglul; do
     php "$ROOT/routing.php" request /de/ home
     php "$ROOT/routing.php" cleanup
 done
+php "$ROOT/uninstall.php"
 echo "OK real WordPress / MariaDB regressions for $GML_TEST_PRODUCT_DIR"

@@ -35,6 +35,21 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.6.0 Uninstall Data Retention
+
+Products can now apply an explicit, per-site uninstall preference through the
+shared uninstaller. Runtime Cron events and disposable page cache are stopped
+when the last GML translation host is removed. Translation memory, manual edits,
+queue rows, language configuration, glossary, credentials, and settings remain
+available for a later reinstall unless an administrator previously selected
+complete removal.
+
+Complete removal drops the current and legacy translation tables and deletes
+translation options and transients while leaving GML SEO-owned options intact.
+If another installed GML product can reuse the shared translation data, the
+uninstaller does not touch shared tables, settings, cache, or jobs. Product
+adapters remain responsible for their own data and for the administrator UI.
+
 ## 0.5.0 External Language Sites
 
 A target language can now be served by an independent HTTPS website. External
