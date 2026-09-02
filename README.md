@@ -35,6 +35,21 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.6.2 Deferred Import Routing Refresh
+
+Routing-affecting multilingual option changes now set one idempotent deferred
+rewrite marker. Bulk imports can update several language records without
+flushing per item; the next safe non-AJAX, non-Cron `init` registers the final
+language rules, performs one soft refresh, and clears the marker after the
+attempt. Re-importing an identical routing configuration does not schedule
+another refresh.
+
+The routing signature is limited to multilingual state, source language,
+enabled target languages, and their local/external URL configuration. Display
+names, flags, and ordering do not trigger rewrite work. Existing root and
+subdirectory URL rules, stored translations, AI settings, queue state, and
+Phase 1 atomic locks are unchanged.
+
 ## 0.6.1 Atomic Worker Locks
 
 Queue processing, full-site crawling, and incremental discovery now share a

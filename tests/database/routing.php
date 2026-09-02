@@ -95,6 +95,25 @@ if ( $mode === 'prepare' ) {
     update_option( 'gml_languages', [ [ 'code' => 'es', 'enabled' => true ], [ 'code' => 'de', 'enabled' => true ] ] );
     do_action( 'admin_init' );
     route_assert( count( language_rules() ) === 2, 're-enabling multilingual restores routes without an AI key' );
+} elseif ( $mode === 'import' ) {
+    $before = language_rules();
+    delete_option( 'gml_translation_flush_rewrite_rules' );
+
+    // Simulate a bulk importer writing routing configuration in several steps.
+    update_option( 'gml_languages', [ [ 'code' => 'fr', 'enabled' => true ] ] );
+    update_option( 'gml_languages', [ [ 'code' => 'fr', 'enabled' => true ], [ 'code' => 'it', 'enabled' => true ] ] );
+    route_assert( get_option( 'gml_translation_flush_rewrite_rules' ) === '1', 'routing import records one deferred rewrite refresh' );
+    route_assert( language_rules() === $before, 'bulk import does not flush rewrite rules per imported item' );
+
+    GML_Translation_Rewrite::maybe_flush_deferred();
+    route_assert( ! get_option( 'gml_translation_flush_rewrite_rules' ), 'safe lifecycle clears the deferred marker after attempting refresh' );
+    route_assert( language_rules() === GML_Translation_Rewrite::rules(), 'safe lifecycle persists the imported language routes' );
+
+    $after = get_option( 'rewrite_rules' );
+    update_option( 'gml_languages', [ [ 'code' => 'fr', 'enabled' => true ], [ 'code' => 'it', 'enabled' => true ] ] );
+    route_assert( ! get_option( 'gml_translation_flush_rewrite_rules' ), 're-importing identical routing does not schedule another refresh' );
+    GML_Translation_Rewrite::maybe_flush_deferred();
+    route_assert( get_option( 'rewrite_rules' ) === $after, 'unchanged routing does not rewrite the persisted rules' );
 } elseif ( $mode === 'cleanup' ) {
     deactivate_plugins( $file );
     foreach ( (array) get_option( 'gml_routing_fixture_ids', [] ) as $id ) wp_delete_post( $id, true );
