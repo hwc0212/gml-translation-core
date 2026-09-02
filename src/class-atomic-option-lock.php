@@ -175,7 +175,7 @@ class GML_Atomic_Option_Lock {
 			return $record;
 		}
 
-		$value = maybe_unserialize( $raw );
+		$value = static::unserialize_record( $raw );
 		if ( is_array( $value ) ) {
 			$record['token']   = isset( $value['token'] ) ? (string) $value['token'] : '';
 			$record['expires'] = isset( $value['expires'] ) ? (int) $value['expires'] : 0;
@@ -190,11 +190,26 @@ class GML_Atomic_Option_Lock {
 	}
 
 	private static function serialize_record( $token, $expires ) {
-		return maybe_serialize( [
+		return serialize( [
 			'version' => 1,
 			'token'   => (string) $token,
 			'expires' => (int) $expires,
 		] );
+	}
+
+	/**
+	 * Decode only the array format written by this lock implementation.
+	 *
+	 * Legacy crawler locks are plain integer timestamps and are intentionally
+	 * returned unchanged for the numeric compatibility path in decode_record().
+	 */
+	private static function unserialize_record( $raw ) {
+		if ( ! is_string( $raw ) || strpos( $raw, 'a:' ) !== 0 ) {
+			return $raw;
+		}
+
+		$value = @unserialize( $raw, [ 'allowed_classes' => false ] );
+		return is_array( $value ) ? $value : $raw;
 	}
 
 	private static function new_token() {
