@@ -115,10 +115,11 @@ class GML_Translation_Editor_Core {
 
         // Invalidate translation dictionary cache
         $row = $wpdb->get_row( $wpdb->prepare(
-            "SELECT source_lang, target_lang FROM $table WHERE id = %d", $id
+            "SELECT source_hash, source_lang, target_lang FROM $table WHERE id = %d", $id
         ) );
         if ( $row ) {
             GML_Translator::invalidate_cache( $row->source_lang, $row->target_lang );
+            if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::translation_changed( $row->source_hash, $row->target_lang );
         }
 
         wp_send_json_success( [ 'message' => __( 'Translation saved.', static::TEXT_DOMAIN ) ] );
@@ -143,7 +144,7 @@ class GML_Translation_Editor_Core {
 
         // Get lang info before deleting for cache invalidation
         $row = $wpdb->get_row( $wpdb->prepare(
-            "SELECT source_lang, target_lang FROM $table WHERE id = %d", $id
+            "SELECT source_hash, source_lang, target_lang FROM $table WHERE id = %d", $id
         ) );
 
         if ( false === $wpdb->delete( $table, [ 'id' => $id ] ) ) {
@@ -153,6 +154,7 @@ class GML_Translation_Editor_Core {
         // Invalidate caches
         if ( $row ) {
             GML_Translator::invalidate_cache( $row->source_lang, $row->target_lang );
+            if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::translation_changed( $row->source_hash, $row->target_lang );
         }
         GML_Page_Cache::invalidate();
         GML_Queue_Processor::clear_readiness_cache();

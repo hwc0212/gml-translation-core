@@ -35,6 +35,28 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.7.0 Shadow Resource Readiness
+
+Adds an additive, database-authoritative resource manifest and readiness layer
+for Phase 2B shadow evaluation. Immutable resource identities connect exact
+same-install, anonymous HTTP 200 HTML renders to versioned manifests, current
+resource/string relations, and per-language readiness snapshots. A language is
+ready only when the current manifest is complete, every critical SEO string is
+translated, and at least 95 percent of all required strings are available.
+
+Source changes stale only the affected resource. Routing or other global
+changes advance one request-bounded generation and schedule bounded
+rediscovery. Translation hash changes recalculate affected resources through a
+reverse index without duplicating shared translation-memory rows. Backfill and
+dirty discovery share the existing owner-token lease lock and support bounded,
+pause/resume processing. Readiness remains available with AI disabled and is
+read directly from the database; persistent object caches are never an
+authority.
+
+This release is infrastructure-only. It does not approve translations, expose
+resource readiness publicly, or change routing, canonical, hreflang, sitemap,
+language-switcher, or AI queue behavior.
+
 ## 0.6.2 Deferred Import Routing Refresh
 
 Routing-affecting multilingual option changes now set one idempotent deferred

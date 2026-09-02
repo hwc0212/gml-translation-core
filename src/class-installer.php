@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '2.5.2';
+    const DB_VERSION = '3.0.0';
     const ERROR_OPTION = 'gml_translation_db_error';
 
     public static function register_hooks() {
@@ -93,6 +93,9 @@ class GML_Installer {
     public static function deactivate() {
         wp_clear_scheduled_hook( 'gml_process_queue' );
         wp_clear_scheduled_hook( 'gml_crawl_content' );
+        wp_clear_scheduled_hook( 'gml_resource_manifest_backfill' );
+        wp_clear_scheduled_hook( 'gml_resource_manifest_dirty' );
+        wp_clear_scheduled_hook( 'gml_resource_readiness_reverse' );
         // NOTE: We intentionally keep gml_crawl_running and gml_crawl_total
         // in the database. WordPress calls deactivate → activate during plugin
         // updates, and clearing these options would silently abort an in-progress
@@ -124,6 +127,68 @@ class GML_Installer {
             UNIQUE KEY hash_lang (source_hash, source_lang, target_lang),
             KEY idx_status (status),
             KEY idx_context (context_type)
+        ) $cc;" );
+
+        // Resource snapshots are additive. Translation Memory remains global;
+        // these tables only map its source hashes to exact page resources.
+        $t = $wpdb->prefix . 'gml_resource_manifests';
+        self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            resource_key VARCHAR(191) NOT NULL,
+            resource_type VARCHAR(20) NOT NULL,
+            object_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+            taxonomy VARCHAR(64) NOT NULL DEFAULT '',
+            variant VARCHAR(64) NOT NULL DEFAULT '',
+            source_url_hash CHAR(64) NOT NULL DEFAULT '',
+            source_revision VARCHAR(191) NOT NULL DEFAULT '',
+            manifest_generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
+            manifest_fingerprint CHAR(64) NOT NULL DEFAULT '',
+            global_generation BIGINT UNSIGNED NOT NULL DEFAULT 1,
+            required_count INT UNSIGNED NOT NULL DEFAULT 0,
+            critical_count INT UNSIGNED NOT NULL DEFAULT 0,
+            discovery_state VARCHAR(32) NOT NULL DEFAULT 'unknown',
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            discovered_at DATETIME NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY resource_key (resource_key),
+            KEY object_lookup (resource_type, object_id),
+            KEY discovery_state (discovery_state),
+            KEY global_generation (global_generation)
+        ) $cc;" );
+
+        $t = $wpdb->prefix . 'gml_resource_strings';
+        self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            resource_id BIGINT UNSIGNED NOT NULL,
+            manifest_generation BIGINT UNSIGNED NOT NULL,
+            source_hash CHAR(32) NOT NULL,
+            context_type VARCHAR(20) NOT NULL DEFAULT 'text',
+            context_key VARCHAR(191) NOT NULL DEFAULT '',
+            critical TINYINT(1) UNSIGNED NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY resource_hash (resource_id, manifest_generation, source_hash),
+            KEY source_hash (source_hash),
+            KEY resource_generation (resource_id, manifest_generation)
+        ) $cc;" );
+
+        $t = $wpdb->prefix . 'gml_resource_readiness';
+        self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            resource_id BIGINT UNSIGNED NOT NULL,
+            target_lang VARCHAR(10) NOT NULL,
+            manifest_generation BIGINT UNSIGNED NOT NULL,
+            global_generation BIGINT UNSIGNED NOT NULL,
+            required_count INT UNSIGNED NOT NULL DEFAULT 0,
+            translated_count INT UNSIGNED NOT NULL DEFAULT 0,
+            critical_missing_count INT UNSIGNED NOT NULL DEFAULT 0,
+            status VARCHAR(24) NOT NULL DEFAULT 'unknown',
+            calculated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY resource_language (resource_id, target_lang),
+            KEY language_status (target_lang, status),
+            KEY resource_generation (resource_id, manifest_generation, global_generation)
         ) $cc;" );
 
         // Async translation queue
@@ -186,6 +251,14 @@ class GML_Installer {
             'gml_exclude_selectors',
             'gml_exclusion_rules',
             'gml_glossary_rules',
+            'gml_resource_manifest_global_generation',
+            'gml_resource_backfill_state',
+            'gml_resource_manifest_dirty',
+            'gml_resource_readiness_reverse_state',
+        ];
+        $defaults['gml_resource_manifest_global_generation'] = 1;
+        $defaults['gml_resource_backfill_state'] = [
+            'status' => 'pending', 'phase' => 'roles', 'cursor' => 0, 'updated_at' => time(),
         ];
         foreach ( $defaults as $key => $value ) {
             if ( false === get_option( $key ) ) {
@@ -203,6 +276,10 @@ class GML_Installer {
             'gml_exclude_selectors',
             'gml_exclusion_rules',
             'gml_glossary_rules',
+            'gml_resource_manifest_global_generation',
+            'gml_resource_backfill_state',
+            'gml_resource_manifest_dirty',
+            'gml_resource_readiness_reverse_state',
         ];
         if ( function_exists( 'wp_set_option_autoload_values' ) ) {
             wp_set_option_autoload_values( array_fill_keys( $options, false ) );

@@ -218,6 +218,7 @@ class GML_Translation_Translator {
                 $target_lang
             ) );
             if ( $existing === 'manual' ) {
+                if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::translation_changed( $hash, $target_lang );
                 return true;
             }
         }
@@ -246,6 +247,7 @@ class GML_Translation_Translator {
 			unset( self::$known_missing[ $pair ][ $hash ] );
         }
         wp_cache_delete( 'gml_dict_' . $source_lang . '_' . $target_lang, 'gml_translate' );
+        if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::translation_changed( $hash, $target_lang );
         return true;
     }
 

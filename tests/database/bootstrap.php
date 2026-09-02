@@ -17,10 +17,10 @@ add_filter( 'pre_http_request', static function() {
 $product = realpath( getenv( 'GML_TEST_PRODUCT_DIR' ) ?: '' );
 if ( ! $product ) exit( "Product directory required.\n" );
 if ( is_file( $product . '/gml-translate.php' ) ) {
-    require $product . '/gml-translate.php';
+    if ( ! class_exists( 'GML_Translate', false ) ) require $product . '/gml-translate.php';
     function gml_test_product_init() { GML_Translate::get_instance()->init_components(); }
 } elseif ( is_file( $product . '/gml-seo.php' ) ) {
-    require $product . '/gml-seo.php';
+    if ( ! class_exists( 'GML_SEO', false ) ) require $product . '/gml-seo.php';
     function gml_test_product_init() { GML_SEO_Translate_Bootstrap::init(); }
 } else {
     exit( "Unknown product.\n" );

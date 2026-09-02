@@ -10,8 +10,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 require_once __DIR__ . '/interface-translation-provider.php';
+require_once __DIR__ . '/interface-resource-translation-provider.php';
 
-class GML_Translation_Provider implements GML_Translation_Provider_Interface {
+class GML_Translation_Provider implements GML_Translation_Provider_Interface, GML_Resource_Translation_Provider_Interface {
 
     /** @var array<string,bool> */
     private $readiness = [];
@@ -87,7 +88,6 @@ class GML_Translation_Provider implements GML_Translation_Provider_Interface {
     }
 
     public function get_translation_status( $object_id, $lang ) {
-        unset( $object_id );
         $lang   = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $lang ) : '';
         $source = $this->get_source_language();
         if ( ! $lang || ! in_array( $lang, $this->get_languages(), true ) ) {
@@ -96,7 +96,66 @@ class GML_Translation_Provider implements GML_Translation_Provider_Interface {
         if ( $lang === $source ) {
             return 'complete';
         }
+        if ( (int) $object_id > 0 ) {
+            $resource = $this->resolve_resource( (int) $object_id );
+            return $resource ? $this->get_resource_status( $resource, $lang ) : 'unknown';
+        }
         return $this->is_index_ready( $lang ) ? 'complete' : 'incomplete';
+    }
+
+    public function resolve_resource( $subject = null ) {
+        return class_exists( 'GML_Resource_Identity' ) ? GML_Resource_Identity::resolve( $subject ) : null;
+    }
+
+    public function get_resource_status( $subject, $lang ) {
+        $resource = $this->resolve_resource( $subject );
+        if ( ! $resource instanceof GML_Resource_Identity ) return 'unknown';
+        if ( ! $resource->is_eligible() ) return 'excluded';
+        return class_exists( 'GML_Resource_Readiness' ) ? GML_Resource_Readiness::get_status( $resource, $lang ) : 'unknown';
+    }
+
+    public function get_resource_statuses( $subject ) {
+        $resource = $this->resolve_resource( $subject );
+        if ( ! $resource instanceof GML_Resource_Identity ) return [];
+        return class_exists( 'GML_Resource_Readiness' ) ? GML_Resource_Readiness::get_all_statuses( $resource ) : [];
+    }
+
+    public function get_resource_statuses_bulk( array $subjects, array $languages = [] ) {
+        return class_exists( 'GML_Resource_Readiness' )
+            ? GML_Resource_Readiness::get_bulk_statuses( $subjects, $languages ?: $this->get_languages() )
+            : [];
+    }
+
+    /** Shadow candidates only. Product adapters must not publish these in Phase 2B. */
+    public function get_resource_alternate_candidates( $subject ) {
+        $resource = $this->resolve_resource( $subject );
+        if ( ! $resource instanceof GML_Resource_Identity || ! $resource->is_eligible() ) return [];
+        $statuses = $this->get_resource_statuses( $resource );
+        $result = [];
+        foreach ( $this->get_languages() as $lang ) {
+            $url = $this->get_translated_url( $resource->get_source_url(), $lang );
+            if ( $url !== '' ) $result[ $lang ] = [ 'url' => $url, 'status' => $statuses[ $lang ] ?? 'unknown' ];
+        }
+        return $result;
+    }
+
+    public function get_resource_alternate_candidates_bulk( array $subjects ) {
+        $resources = [];
+        foreach ( $subjects as $subject ) {
+            $resource = $this->resolve_resource( $subject );
+            if ( $resource instanceof GML_Resource_Identity ) $resources[ $resource->get_key() ] = $resource;
+        }
+        if ( ! $resources || ! class_exists( 'GML_Resource_Readiness' ) ) return [];
+        $languages = $this->get_languages();
+        $statuses = $this->get_resource_statuses_bulk( array_values( $resources ), $languages );
+        $result = [];
+        foreach ( $resources as $key => $resource ) {
+            foreach ( $languages as $lang ) {
+                $url = $this->get_translated_url( $resource->get_source_url(), $lang );
+                if ( $url !== '' ) $result[ $key ][ $lang ] = [ 'url' => $url, 'status' => $statuses[ $key ][ $lang ] ?? 'unknown' ];
+            }
+        }
+        return $result;
     }
 
     public function get_source_language() {

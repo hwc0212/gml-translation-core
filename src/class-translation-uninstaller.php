@@ -16,12 +16,18 @@ final class GML_Translation_Uninstaller {
         'gml_plans',
         'gml_queue',
         'gml_index',
+        'gml_resource_readiness',
+        'gml_resource_strings',
+        'gml_resource_manifests',
     ];
 
     const CRON_HOOKS = [
         'gml_process_queue',
         'gml_crawl_content',
         'gml_discover_changed_content',
+        'gml_resource_manifest_backfill',
+        'gml_resource_manifest_dirty',
+        'gml_resource_readiness_reverse',
     ];
 
     /**
