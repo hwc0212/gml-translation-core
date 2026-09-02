@@ -35,6 +35,22 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.6.1 Atomic Worker Locks
+
+Queue processing, full-site crawling, and incremental discovery now share a
+database compare-and-swap lease lock. Acquisition, stale takeover, renewal, and
+release use owner tokens and exact stored-value comparisons, so a stale process
+cannot delete or overwrite a newer owner's lock even when a persistent object
+cache returns old option data. Existing queue-array and crawler-integer lock
+values remain readable and are replaced atomically after they expire.
+
+Queue recovery of rows left in `processing` is restricted to the current lease
+owner. Provider calls and crawler fetches are bounded, and each worker renews
+its lease before and after slow work and before committing shared progress. A
+worker that outlives its lease stops writing; its shutdown handler can release
+only a lock with the same token. No table, translation row, Translation Memory
+entry, URL, provider, prompt, or readiness rule changes in this release.
+
 ## 0.6.0 Uninstall Data Retention
 
 Products can now apply an explicit, per-site uninstall preference through the

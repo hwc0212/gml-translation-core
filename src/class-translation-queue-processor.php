@@ -15,6 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 require_once __DIR__ . '/class-translation-queue-scope.php';
 require_once __DIR__ . '/class-translation-error.php';
 require_once __DIR__ . '/class-translation-text.php';
+require_once __DIR__ . '/class-atomic-option-lock.php';
 
 abstract class GML_Translation_Queue_Processor {
 
@@ -129,8 +130,8 @@ abstract class GML_Translation_Queue_Processor {
         register_shutdown_function( [ static::class, 'release_process_lock' ], $lock_token );
 
         try {
-            // A new lock may only be acquired after the previous lock expired.
-            $wpdb->query( "UPDATE $queue_table SET status = 'pending' WHERE status = 'processing'" );
+            // Only the current lease owner may recover work left by a crashed worker.
+            if ( ! static::recover_processing_rows( $lock_token, $wpdb, $queue_table ) ) return;
 
             $normal_languages = GML_Translation_Queue_Scope::normal_languages();
             $enabled_languages = GML_Translation_Queue_Scope::enabled_languages();
@@ -176,6 +177,7 @@ abstract class GML_Translation_Queue_Processor {
                 return $item->target_lang === $first->target_lang
                     && static::api_type( $item->context_type ?? '' ) === $first_type;
             } ) );
+			if ( ! static::renew_process_lock( $lock_token ) ) return;
 			$bounded_items = [];
 			$input_bytes   = 0;
 			$max_item      = class_exists( 'GML_Translator' ) ? GML_Translator::MAX_SOURCE_BYTES : 32768;
@@ -201,6 +203,7 @@ abstract class GML_Translation_Queue_Processor {
             if ( empty( $ids ) ) {
                 return;
             }
+            if ( ! static::renew_process_lock( $lock_token ) ) return;
             $wpdb->query( "UPDATE $queue_table SET status = 'processing' WHERE id IN (" . implode( ',', $ids ) . ')' );
 
             $api        = $this->create_api();
@@ -210,6 +213,7 @@ abstract class GML_Translation_Queue_Processor {
             $api_items  = [];
             foreach ( $items as $item ) {
                 if ( GML_Translation_Text::is_technical_only( $item->source_text ) ) {
+                    if ( ! static::renew_process_lock( $lock_token ) ) return;
                     $saved = $this->save_translation_result(
                         $wpdb,
                         $queue_table,
@@ -238,11 +242,14 @@ abstract class GML_Translation_Queue_Processor {
             $source     = (string) $first->source_lang;
             $target     = (string) $first->target_lang;
             $activity = [ 'token' => $lock_token, 'started' => time(), 'language' => $target ];
-            update_option( 'gml_translation_last_batch', $activity, false );
 
             try {
+                if ( ! static::renew_process_lock( $lock_token ) ) return;
+                update_option( 'gml_translation_last_batch', $activity, false );
                 $translated = $api->translate_batch( $texts, $source, $target, $first_type );
+                if ( ! static::renew_process_lock( $lock_token ) ) return;
             } catch ( Throwable $exception ) {
+                if ( ! static::renew_process_lock( $lock_token ) ) return;
                 $diagnostic = static::provider_failure( $api, $exception->getMessage() );
                 if ( $diagnostic['category'] === 'transient' ) {
                     $this->release_processing_items( $wpdb, $queue_table, $ids );
@@ -269,9 +276,12 @@ abstract class GML_Translation_Queue_Processor {
                         continue;
                     }
                     try {
+                        if ( ! static::renew_process_lock( $lock_token ) ) return;
                         $single = $api->translate_batch( [ $item->source_text ], $source, $target, $first_type );
+                        if ( ! static::renew_process_lock( $lock_token ) ) return;
                         $saved  = $this->save_translation_result( $wpdb, $queue_table, $item, $single[0] ?? null, $translator, $parser ) || $saved;
                     } catch ( Throwable $single_exception ) {
+                        if ( ! static::renew_process_lock( $lock_token ) ) return;
                         $diagnostic = static::provider_failure( $api, $single_exception->getMessage() );
                         if ( $diagnostic['category'] === 'transient' ) {
                             $this->release_processing_items( $wpdb, $queue_table, $ids );
@@ -296,6 +306,7 @@ abstract class GML_Translation_Queue_Processor {
 
             if ( is_array( $translated ) ) {
                 foreach ( $items as $index => $item ) {
+                    if ( ! static::renew_process_lock( $lock_token ) ) return;
                     $saved = $this->save_translation_result(
                         $wpdb,
                         $queue_table,
@@ -307,6 +318,7 @@ abstract class GML_Translation_Queue_Processor {
                 }
             }
 
+            if ( ! static::renew_process_lock( $lock_token ) ) return;
             if ( $saved ) {
                 static::clear_backoff();
                 static::invalidate_translation_state();
@@ -323,7 +335,7 @@ abstract class GML_Translation_Queue_Processor {
                 }
             }
         } finally {
-            if ( isset( $activity ) ) {
+            if ( isset( $activity ) && GML_Atomic_Option_Lock::is_owner( static::LOCK_OPTION, $lock_token ) ) {
                 $activity['finished'] = time();
                 update_option( 'gml_translation_last_batch', $activity, false );
             }
@@ -348,27 +360,21 @@ abstract class GML_Translation_Queue_Processor {
     }
 
     protected static function acquire_process_lock() {
-        $now   = time();
-        $token = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : uniqid( 'gml-', true );
-        $value = [ 'token' => $token, 'expires' => $now + static::LOCK_TTL ];
-        if ( add_option( static::LOCK_OPTION, $value, '', false ) ) {
-            return $token;
-        }
-        $existing = get_option( static::LOCK_OPTION, [] );
-        if ( is_array( $existing ) && (int) ( $existing['expires'] ?? 0 ) < $now ) {
-            delete_option( static::LOCK_OPTION );
-            if ( add_option( static::LOCK_OPTION, $value, '', false ) ) {
-                return $token;
-            }
-        }
-        return '';
+        return GML_Atomic_Option_Lock::acquire( static::LOCK_OPTION, static::LOCK_TTL );
     }
 
     public static function release_process_lock( $token ) {
-        $existing = get_option( static::LOCK_OPTION, [] );
-        if ( is_array( $existing ) && hash_equals( (string) ( $existing['token'] ?? '' ), (string) $token ) ) {
-            delete_option( static::LOCK_OPTION );
-        }
+        return GML_Atomic_Option_Lock::release( static::LOCK_OPTION, $token );
+    }
+
+    protected static function renew_process_lock( $token ) {
+        return GML_Atomic_Option_Lock::refresh( static::LOCK_OPTION, $token, static::LOCK_TTL );
+    }
+
+    protected static function recover_processing_rows( $token, $wpdb, $table ) {
+        if ( ! static::renew_process_lock( $token ) ) return false;
+        $wpdb->query( "UPDATE $table SET status = 'pending' WHERE status = 'processing'" );
+        return true;
     }
 
     private function release_processing_items( $wpdb, $table, array $ids ) {

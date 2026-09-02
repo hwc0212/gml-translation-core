@@ -99,7 +99,7 @@ class GML_Translation_Controls {
         }
         $sample = self::sample_status();
         if ( ! $sample['active'] || ! $sample['valid'] ) return new WP_Error( 'invalid_sample', 'No valid limited sample is available for an enabled language.' );
-        $lock = (array) get_option( GML_Queue_Processor::LOCK_OPTION, [] );
+        $lock = GML_Atomic_Option_Lock::get( GML_Queue_Processor::LOCK_OPTION );
         if ( ! empty( $lock['token'] ) && (int) ( $lock['expires'] ?? 0 ) > time() ) {
             return new WP_Error( 'sample_busy', 'The current translation batch is still finishing. Try again after it stops.' );
         }
@@ -158,7 +158,7 @@ class GML_Translation_Controls {
             $where = $lang === '' ? '' : $wpdb->prepare( ' AND target_lang = %s', $lang );
             $pending = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}gml_queue WHERE status IN ('pending','processing')$where" );
         }
-        $lock = (array) get_option( GML_Queue_Processor::LOCK_OPTION, [] );
+        $lock = GML_Atomic_Option_Lock::get( GML_Queue_Processor::LOCK_OPTION );
         $last = (array) get_option( 'gml_translation_last_batch', [] );
         $next = wp_next_scheduled( GML_Queue_Processor::CRON_HOOK );
         $paused = (bool) get_option( 'gml_translation_paused', false );

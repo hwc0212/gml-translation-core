@@ -9,6 +9,7 @@
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
+require_once __DIR__ . '/class-atomic-option-lock.php';
 
 class GML_Translation_Content_Crawler {
 	const CRON_HOOK              = 'gml_crawl_content';
@@ -18,6 +19,7 @@ class GML_Translation_Content_Crawler {
 	const INCREMENTAL_BATCH_SIZE = 2;
 	const MAX_DIRTY_POSTS        = 200;
 	const LOCK_OPTION            = 'gml_translation_crawl_lock';
+	const LOCK_TTL               = 300;
 
 	public function __construct() {
 		add_action( static::CRON_HOOK, [ $this, 'crawl_batch' ] );
@@ -100,12 +102,16 @@ class GML_Translation_Content_Crawler {
 	public function discover_changed_content() {
 		$dirty = static::dirty_posts();
 		if ( ! $dirty || ! static::ai_translation_available() || static::safety_paused() ) return;
-		if ( ! static::acquire_lock() ) {
+		$lock_token = static::acquire_lock();
+		if ( $lock_token === '' ) {
 			$this->schedule_incremental( 60 );
 			return;
 		}
+		register_shutdown_function( [ static::class, 'release_lock' ], $lock_token );
 
 		try {
+			$dirty = static::dirty_posts();
+			if ( ! $dirty ) return;
 			$languages   = (array) get_option( 'gml_languages', [] );
 			$source_lang = static::normalize_language( get_option( 'gml_source_lang', 'en' ) );
 			$targets     = [];
@@ -125,6 +131,7 @@ class GML_Translation_Content_Crawler {
 			$translator = new GML_Translator();
 			$post_ids   = array_slice( array_keys( $dirty ), 0, static::INCREMENTAL_BATCH_SIZE );
 			foreach ( $post_ids as $post_id ) {
+				if ( ! static::renew_lock( $lock_token ) ) return;
 				$post_id = (int) $post_id;
 				try {
 					$post = get_post( $post_id );
@@ -132,8 +139,12 @@ class GML_Translation_Content_Crawler {
 						$html = $this->fetch_rendered_html( $post );
 						if ( empty( $html ) ) $html = $this->build_post_html( $post );
 						if ( $html !== '' ) {
+							if ( ! static::renew_lock( $lock_token ) ) return;
 							$parsed = $parser->parse( $html );
-							foreach ( $targets as $target ) $translator->discover( $parsed, $target );
+							foreach ( $targets as $target ) {
+								if ( ! static::renew_lock( $lock_token ) ) return;
+								$translator->discover( $parsed, $target );
+							}
 						}
 					}
 					unset( $dirty[ $post_id ] );
@@ -144,12 +155,13 @@ class GML_Translation_Content_Crawler {
 				}
 			}
 
+			if ( ! static::renew_lock( $lock_token ) ) return;
 			if ( $dirty ) update_option( static::DIRTY_POSTS_OPTION, $dirty, false );
 			else delete_option( static::DIRTY_POSTS_OPTION );
 			update_option( 'gml_translation_incremental_last_activity', time(), false );
 			if ( class_exists( 'GML_Translation_Readiness' ) ) GML_Translation_Readiness::clear_cache();
 		} finally {
-			static::release_lock();
+			static::release_lock( $lock_token );
 		}
 
 		if ( static::dirty_posts() ) $this->schedule_incremental( 60 );
@@ -211,7 +223,7 @@ class GML_Translation_Content_Crawler {
 		$next = wp_next_scheduled( static::CRON_HOOK );
 		if ( ! $running ) $state = get_option( 'gml_crawl_completed', false ) ? 'completed' : 'stopped';
 		elseif ( ! static::ai_translation_available() || GML_Queue_Processor::circuit_is_open() ) $state = 'blocked';
-		elseif ( (int) get_option( static::LOCK_OPTION, 0 ) > time() ) $state = 'scanning';
+		elseif ( GML_Atomic_Option_Lock::is_active( static::LOCK_OPTION ) ) $state = 'scanning';
 		elseif ( ! $next ) $state = 'not_scheduled';
 		elseif ( $next < time() - 120 ) $state = 'overdue';
 		else $state = 'scheduled';
@@ -248,20 +260,23 @@ class GML_Translation_Content_Crawler {
 			static::stop_crawl();
 			return;
 		}
-		if ( ! static::acquire_lock() ) {
+		$lock_token = static::acquire_lock();
+		if ( $lock_token === '' ) {
 			return;
 		}
+		register_shutdown_function( [ static::class, 'release_lock' ], $lock_token );
 
 		try {
-			$this->process_crawl_batch();
+			$this->process_crawl_batch( $lock_token );
 		} catch ( \Throwable $e ) {
 			static::log_event( 'batch_failed' );
 		} finally {
-			static::release_lock();
+			static::release_lock( $lock_token );
 		}
 	}
 
-	protected function process_crawl_batch() {
+	protected function process_crawl_batch( $lock_token ) {
+		if ( ! static::renew_lock( $lock_token ) ) return;
 		$languages   = (array) get_option( 'gml_languages', [] );
 		$source_lang = static::normalize_language( get_option( 'gml_source_lang', 'en' ) );
 		if ( empty( $languages ) || $source_lang === '' ) {
@@ -292,6 +307,7 @@ class GML_Translation_Content_Crawler {
 		$processed = 0;
 		foreach ( $posts as $post ) {
 			if ( ! get_option( 'gml_crawl_running', false ) || ! static::ai_translation_available() || static::safety_paused() ) break;
+			if ( ! static::renew_lock( $lock_token ) ) return;
 			$processed++;
 			try {
 				$html = $this->fetch_rendered_html( $post );
@@ -302,6 +318,7 @@ class GML_Translation_Content_Crawler {
 					continue;
 				}
 
+				if ( ! static::renew_lock( $lock_token ) ) return;
 				$parsed = $parser->parse( $html );
 				foreach ( $languages as $language ) {
 					if ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $language ) ) continue;
@@ -313,6 +330,7 @@ class GML_Translation_Content_Crawler {
 					) {
 						continue;
 					}
+					if ( ! static::renew_lock( $lock_token ) ) return;
 					$translator->discover( $parsed, $target );
 				}
 			} catch ( \Throwable $e ) {
@@ -321,6 +339,7 @@ class GML_Translation_Content_Crawler {
 		}
 
 		if ( $processed > 0 ) {
+			if ( ! static::renew_lock( $lock_token ) ) return;
 			update_option( 'gml_crawl_offset', $offset + $processed, false );
 			update_option( 'gml_crawl_last_activity', time(), false );
 			if ( $offset + $processed >= (int) get_option( 'gml_crawl_total', 0 ) ) static::stop_crawl( true );
@@ -484,19 +503,15 @@ class GML_Translation_Content_Crawler {
 	}
 
 	protected static function acquire_lock() {
-		$now     = time();
-		$expires = (int) get_option( static::LOCK_OPTION, 0 );
-		if ( $expires > $now ) {
-			return false;
-		}
-		if ( $expires > 0 ) {
-			delete_option( static::LOCK_OPTION );
-		}
-		return add_option( static::LOCK_OPTION, $now + 90, '', false );
+		return GML_Atomic_Option_Lock::acquire( static::LOCK_OPTION, static::LOCK_TTL );
 	}
 
-	protected static function release_lock() {
-		delete_option( static::LOCK_OPTION );
+	protected static function renew_lock( $token ) {
+		return GML_Atomic_Option_Lock::refresh( static::LOCK_OPTION, $token, static::LOCK_TTL );
+	}
+
+	public static function release_lock( $token ) {
+		return GML_Atomic_Option_Lock::release( static::LOCK_OPTION, $token );
 	}
 
 	protected static function unschedule_crawl() {

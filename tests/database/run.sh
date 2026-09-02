@@ -17,6 +17,7 @@ done
 for pid in "${pids[@]}"; do wait "$pid"; done
 php "$ROOT/enqueue.php" verify
 php "$ROOT/controls.php"
+GML_TEST_CORE_SRC="$(cd "$ROOT/../../src" && pwd)" php "$ROOT/locking.php"
 php "$ROOT/cache-confirmation.php"
 php "$ROOT/gemini-response.php"
 php "$ROOT/failure-recovery.php"
