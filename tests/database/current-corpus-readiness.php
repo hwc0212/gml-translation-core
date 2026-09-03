@@ -83,6 +83,21 @@ for ( $i = 0; $i < 10; $i++ ) {
 
 $resource = GML_Resource_Identity::from_parts( 'post', 970001, '', 'page', home_url( '/current-corpus/' ), 'r1' );
 gml_db_assert( true === GML_Resource_Manifest_Store::save_complete( $resource, $nodes ), 'current-corpus manifest is saved' );
+
+$public_queries = [];
+$query_watcher = static function( $sql ) use ( &$public_queries ) {
+    $public_queries[] = $sql;
+    return $sql;
+};
+add_filter( 'query', $query_watcher );
+GML_Translation_Readiness::clear_cache();
+$public_map = GML_Translation_Readiness::readiness_map();
+remove_filter( 'query', $query_watcher );
+gml_db_assert( empty( $public_map['qc'] ), 'public readiness withholds incomplete current coverage' );
+gml_db_assert( ! array_filter( $public_queries, static function( $sql ) use ( $queue ) {
+    return strpos( $sql, $queue ) !== false;
+} ), 'public readiness never scans queue history' );
+
 GML_Translation_Readiness::clear_cache();
 $stats = GML_Translation_Readiness::language_statistics()['qc'];
 gml_db_assert( $stats['required'] === 20 && $stats['translated'] === 18, 'historical translations do not inflate current coverage' );
