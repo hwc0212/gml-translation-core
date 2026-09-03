@@ -35,6 +35,31 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.7.2 Current-Corpus Queue and Readiness
+
+Language progress, public language readiness, normal queue batches, limited
+retries, and the safety circuit now use only unique source hashes referenced by
+the current completed resource-manifest generation. Text removed or replaced
+during a redesign no longer depresses current completion percentages, consumes
+retry quota, or blocks a language indefinitely.
+
+Historical queue failures, pending rows, Translation Memory, manual
+translations, glossary data, and audit details are retained without migration
+or deletion. The administration screens label obsolete failures as stored
+history, while current missing, pending, failed, and not-yet-queued text remain
+separate actionable counts.
+
+Current-corpus filtering activates only after the full manifest inventory is
+complete and free of current render errors. Before that point, public readiness
+fails closed and queue controls keep the legacy scope. Public readiness requires
+all critical SEO strings and at least 95 percent current-string coverage. This
+is machine readiness, not Human Approval.
+
+Frontend readiness uses a short-lived lightweight coverage cache and does not
+scan queue history. Actionable failure counts are also cached briefly and are
+invalidated with queue, Translation Memory, manifest, and backfill changes. No
+database schema, URL, Provider, prompt, or uninstall policy changes are made.
+
 ## 0.7.1 Durable Readiness Invalidation
 
 Translation Memory changes now fail closed with one indexed database update:

@@ -140,6 +140,10 @@ abstract class GML_Translation_Queue_Processor {
                 $placeholders = implode( ',', array_fill( 0, count( $normal_languages ), '%s' ) );
                 $normal_sql = $wpdb->prepare( "target_lang IN ($placeholders)", $normal_languages );
                 if ( $sample_ids ) $normal_sql .= ' AND id NOT IN (' . implode( ',', $sample_ids ) . ')';
+                $current_scope = class_exists( 'GML_Translation_Readiness' )
+                    ? GML_Translation_Readiness::current_queue_scope_sql( 'q' )
+                    : '';
+                if ( $current_scope !== '' ) $normal_sql .= ' AND ' . $current_scope;
                 $scopes[] = '(' . $normal_sql . ')';
             }
             if ( $sample_ids && ! GML_Translation_Queue_Scope::sample_paused() && $enabled_languages ) {
@@ -149,7 +153,7 @@ abstract class GML_Translation_Queue_Processor {
             if ( ! $scopes ) return;
             $scope_sql = ' AND (' . implode( ' OR ', $scopes ) . ')';
             $limit      = (int) static::BATCH_SIZE;
-            $query      = "SELECT * FROM $queue_table
+            $query      = "SELECT q.* FROM $queue_table q
                  WHERE status = 'pending' AND attempts < 3
                  $scope_sql";
             $order      = " ORDER BY target_lang ASC, context_type ASC, priority DESC, created_at ASC, id ASC LIMIT $limit";
@@ -481,8 +485,12 @@ abstract class GML_Translation_Queue_Processor {
         $table = $wpdb->prefix . 'gml_queue';
         static::reconcile_resolved_failures( $lang );
         $limit = max( 1, min( static::RETRY_LIMIT, null === $limit ? static::RETRY_LIMIT : (int) $limit ) );
+        $current_scope = class_exists( 'GML_Translation_Readiness' )
+            ? GML_Translation_Readiness::current_queue_scope_sql( 'q' )
+            : '';
+        $current_scope = $current_scope !== '' ? ' AND ' . $current_scope : '';
         $ids   = $wpdb->get_col( $wpdb->prepare(
-            "SELECT id FROM $table WHERE status = 'failed' AND target_lang = %s
+            "SELECT q.id FROM $table q WHERE q.status = 'failed' AND q.target_lang = %s$current_scope
              ORDER BY priority DESC, created_at ASC LIMIT %d",
             sanitize_key( $lang ),
             $limit
@@ -548,7 +556,7 @@ abstract class GML_Translation_Queue_Processor {
 
     public static function maybe_open_for_existing_failures() {
         if ( static::circuit_is_open() ) return true;
-        $counts = static::get_failure_counts();
+        $counts = static::get_actionable_failure_counts();
         if ( $counts['new'] < static::LEGACY_FAILURE_THRESHOLD ) return false;
         static::open_circuit( sprintf(
             __( 'Translation paused for safety: %d failed items require provider verification and a limited retry sample.', static::TEXT_DOMAIN ),
@@ -628,6 +636,37 @@ abstract class GML_Translation_Queue_Processor {
         return [ 'total' => $failed, 'acknowledged' => $acknowledged, 'new' => max( 0, $failed - $acknowledged ) ];
     }
 
+    /**
+     * Failures eligible for retry and safety accounting on the current site.
+     * Historical rows remain stored and visible through get_failure_counts().
+     */
+    public static function get_actionable_failure_counts() {
+        $scope = class_exists( 'GML_Translation_Readiness' )
+            ? GML_Translation_Readiness::current_queue_scope_sql( 'q' )
+            : '';
+        if ( $scope === '' ) return static::get_failure_counts();
+
+        $cached = wp_cache_get( 'gml_actionable_failure_counts', 'gml_translate' );
+        if ( is_array( $cached ) ) return $cached;
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'gml_queue';
+        $failed = (int) $wpdb->get_var( "SELECT COUNT(*) FROM $table q WHERE q.status='failed' AND $scope" );
+        $ack = get_option( static::FAILURE_ACK_OPTION, 0 );
+        if ( is_array( $ack ) && ! empty( $ack['at'] ) ) {
+            $new = (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM $table q WHERE q.status='failed' AND q.processed_at >= %s AND $scope",
+                sanitize_text_field( $ack['at'] )
+            ) );
+            $acknowledged = max( 0, $failed - $new );
+        } else {
+            $acknowledged = min( $failed, max( 0, (int) $ack ) );
+        }
+        $counts = [ 'total' => $failed, 'acknowledged' => $acknowledged, 'new' => max( 0, $failed - $acknowledged ) ];
+        wp_cache_set( 'gml_actionable_failure_counts', $counts, 'gml_translate', 60 );
+        return $counts;
+    }
+
     public static function get_failure_details( $lang = '', $limit = 20 ) {
         global $wpdb;
         $table = $wpdb->prefix . 'gml_queue';
@@ -702,6 +741,7 @@ abstract class GML_Translation_Queue_Processor {
 
     public static function clear_readiness_cache( $lang = '' ) {
         unset( $lang );
+        wp_cache_delete( 'gml_actionable_failure_counts', 'gml_translate' );
         if ( class_exists( 'GML_Translation_Readiness' ) ) {
             GML_Translation_Readiness::clear_cache();
         }

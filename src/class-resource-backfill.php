@@ -17,16 +17,19 @@ final class GML_Resource_Backfill {
 
     public static function reset_pending( $reason = '' ) {
         update_option( self::OPTION, [ 'status' => 'pending', 'phase' => 'roles', 'cursor' => 0, 'reason' => substr( $reason, 0, 64 ), 'updated_at' => time() ], false );
+        self::clear_language_readiness();
     }
 
     public static function pause() {
         $state = self::state(); $state['status'] = 'paused'; $state['updated_at'] = time();
         update_option( self::OPTION, $state, false ); wp_clear_scheduled_hook( self::HOOK );
+        self::clear_language_readiness();
     }
 
     public static function resume() {
         $state = self::state(); $state['status'] = 'pending'; $state['updated_at'] = time();
         update_option( self::OPTION, $state, false ); self::maybe_schedule();
+        self::clear_language_readiness();
     }
 
     public static function maybe_schedule() {
@@ -56,6 +59,7 @@ final class GML_Resource_Backfill {
             $state['status'] = $state['phase'] === 'complete' ? 'complete' : 'pending';
             $state['updated_at'] = time();
             update_option( self::OPTION, $state, false );
+            self::clear_language_readiness();
         } finally {
             GML_Atomic_Option_Lock::release( self::LOCK, $token );
         }
@@ -104,5 +108,9 @@ final class GML_Resource_Backfill {
             $state['phase'] = 'complete'; $state['cursor'] = 0;
         }
         return [];
+    }
+
+    private static function clear_language_readiness() {
+        if ( class_exists( 'GML_Translation_Readiness' ) ) GML_Translation_Readiness::clear_cache();
     }
 }

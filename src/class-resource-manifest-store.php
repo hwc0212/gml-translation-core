@@ -91,6 +91,7 @@ final class GML_Resource_Manifest_Store {
         }
 
         if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::recalculate_resources( [ $resource_id ] );
+        self::clear_language_readiness();
         return true;
     }
 
@@ -107,12 +108,18 @@ final class GML_Resource_Manifest_Store {
             'global_generation' => class_exists( 'GML_Resource_Manifest_Manager' ) ? GML_Resource_Manifest_Manager::global_generation() : 1,
             'discovery_state' => $state, 'updated_at' => $now,
         ];
-        if ( $existing ) return false === $wpdb->update( self::manifest_table(), $data, [ 'id' => (int) $existing->id ] ) ? false : true;
+        if ( $existing ) {
+            $saved = false === $wpdb->update( self::manifest_table(), $data, [ 'id' => (int) $existing->id ] ) ? false : true;
+            if ( $saved ) self::clear_language_readiness();
+            return $saved;
+        }
         $data += [
             'resource_key' => $resource->get_key(), 'manifest_generation' => 0, 'manifest_fingerprint' => '',
             'required_count' => 0, 'critical_count' => 0, 'created_at' => $now, 'discovered_at' => null,
         ];
-        return false !== $wpdb->insert( self::manifest_table(), $data );
+        $saved = false !== $wpdb->insert( self::manifest_table(), $data );
+        if ( $saved ) self::clear_language_readiness();
+        return $saved;
     }
 
     public static function mark_stale( $subject, $revision = '' ) {
@@ -121,10 +128,12 @@ final class GML_Resource_Manifest_Store {
         if ( ! $resource instanceof GML_Resource_Identity ) return false;
         $existing = self::get_by_key( $resource->get_key() );
         if ( ! $existing ) return self::record_state( $resource, 'stale' );
-        return false !== $wpdb->update( self::manifest_table(), [
+        $saved = false !== $wpdb->update( self::manifest_table(), [
             'source_revision' => substr( (string) ( $revision !== '' ? $revision : $resource->get_source_revision() ), 0, 191 ),
             'discovery_state' => 'stale', 'updated_at' => current_time( 'mysql' ),
         ], [ 'id' => (int) $existing->id ] );
+        if ( $saved ) self::clear_language_readiness();
+        return $saved;
     }
 
     public static function mark_stale_by_key( $key, $revision = '' ) {
@@ -132,12 +141,18 @@ final class GML_Resource_Manifest_Store {
         if ( ! self::tables_ready() || ! is_string( $key ) || $key === '' ) return false;
         $data = [ 'discovery_state' => 'stale', 'updated_at' => current_time( 'mysql' ) ];
         if ( $revision !== '' ) $data['source_revision'] = substr( (string) $revision, 0, 191 );
-        return false !== $wpdb->update( self::manifest_table(), $data, [ 'resource_key' => substr( $key, 0, 191 ) ] );
+        $saved = false !== $wpdb->update( self::manifest_table(), $data, [ 'resource_key' => substr( $key, 0, 191 ) ] );
+        if ( $saved ) self::clear_language_readiness();
+        return $saved;
     }
 
     public static function get_by_key( $key ) {
         global $wpdb;
         if ( ! self::tables_ready() ) return null;
         return $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::manifest_table() . ' WHERE resource_key=%s LIMIT 1', (string) $key ) );
+    }
+
+    private static function clear_language_readiness() {
+        if ( class_exists( 'GML_Translation_Readiness' ) ) GML_Translation_Readiness::clear_cache();
     }
 }

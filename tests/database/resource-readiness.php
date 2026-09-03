@@ -112,7 +112,7 @@ function gml_phase2b_resource( $id, $slug, $revision = 'r1' ) {
     );
 }
 
-// The language-level operational metric is ready, while Page B is only 60%.
+// Historical table totals cannot certify a language before current manifests exist.
 for ( $i = 0; $i < 97; $i++ ) {
     $text = 'phase2b global translated ' . $i;
     $wpdb->replace( $index_table, [
@@ -132,7 +132,7 @@ for ( $i = 0; $i < 3; $i++ ) {
     ] );
 }
 GML_Translation_Readiness::clear_cache();
-gml_db_assert( GML_Translation_Readiness::language_is_index_ready( 'qa' ), 'language operational readiness is at least 97 percent' );
+gml_db_assert( ! GML_Translation_Readiness::language_is_index_ready( 'qa' ), 'historical 97 percent coverage cannot certify an undiscovered current corpus' );
 
 $resource_a = gml_phase2b_resource( 910001, 'phase2b-page-a' );
 $resource_b = gml_phase2b_resource( 910002, 'phase2b-page-b' );
