@@ -595,14 +595,39 @@ abstract class GML_Translation_Queue_Processor {
         global $wpdb;
         $table = $wpdb->prefix . 'gml_queue';
         $limit = max( 1, min( 10, (int) $limit ) );
-        $where = "WHERE status = 'failed'";
+        $where = "WHERE q.status = 'failed'";
         if ( $lang !== '' ) {
-            $where .= $wpdb->prepare( ' AND target_lang = %s', sanitize_key( $lang ) );
+            $where .= $wpdb->prepare( ' AND q.target_lang = %s', sanitize_key( $lang ) );
         }
         $rows = $wpdb->get_results(
-            "SELECT error_message, COUNT(*) AS item_count FROM $table $where
-             GROUP BY error_message ORDER BY item_count DESC LIMIT 100"
+            "SELECT q.error_message, COUNT(*) AS item_count FROM $table q $where
+             GROUP BY q.error_message ORDER BY item_count DESC LIMIT 100"
         );
+        return static::group_failure_summary( $rows, $limit );
+    }
+
+    /** Current, unresolved failure reasons for administration and recovery. */
+    public static function get_actionable_failure_summary( $lang = '', $limit = 5 ) {
+        $scope = class_exists( 'GML_Translation_Readiness' )
+            ? GML_Translation_Readiness::current_queue_scope_sql( 'q' )
+            : '';
+        if ( $scope === '' ) return static::get_failure_summary( $lang, $limit );
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'gml_queue';
+        $limit = max( 1, min( 10, (int) $limit ) );
+        $where = "WHERE q.status='failed' AND $scope";
+        if ( $lang !== '' ) {
+            $where .= $wpdb->prepare( ' AND q.target_lang=%s', sanitize_key( $lang ) );
+        }
+        $rows = $wpdb->get_results(
+            "SELECT q.error_message,COUNT(*) AS item_count FROM $table q $where
+             GROUP BY q.error_message ORDER BY item_count DESC LIMIT 100"
+        );
+        return static::group_failure_summary( $rows, $limit );
+    }
+
+    private static function group_failure_summary( $rows, $limit ) {
         $groups = [];
         foreach ( (array) $rows as $row ) {
             $failure = GML_Translation_Error::classify( [], $row->error_message );

@@ -105,6 +105,8 @@ gml_db_assert( $stats['pending'] === 1 && $stats['failed'] === 1, 'only current 
 gml_db_assert( $stats['historical_failed'] === 11 && $stats['historical_irrelevant'] === 10, 'obsolete failures remain available as history' );
 gml_db_assert( ! GML_Translation_Readiness::language_is_index_ready( 'qc' ), '90 percent current coverage remains withheld' );
 gml_db_assert( GML_Queue_Processor::get_actionable_failure_counts()['total'] === 1, 'safety accounting ignores obsolete redesign failures' );
+$current_failure_summary = GML_Queue_Processor::get_actionable_failure_summary( 'qc', 3 );
+gml_db_assert( count( $current_failure_summary ) === 1 && (int) $current_failure_summary[0]->item_count === 1, 'failure summary reports only current unresolved content' );
 
 $scope = GML_Translation_Readiness::current_queue_scope_sql( 'q' );
 gml_db_assert( $scope !== '', 'completed manifest inventory activates current queue scope' );
