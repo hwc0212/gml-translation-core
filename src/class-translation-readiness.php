@@ -309,7 +309,10 @@ class GML_Translation_Readiness {
         $result = [];
         foreach ( $codes as $code ) {
             $done = (int) ( $translated[ $code ]->item_count ?? 0 );
-            $pending = (int) ( $queued[ $code ]->pending_count ?? 0 );
+            $legacy_incomplete = (int) ( $queued[ $code ]->item_count ?? 0 );
+            $pending = isset( $queued[ $code ]->pending_count )
+                ? (int) $queued[ $code ]->pending_count
+                : $legacy_incomplete;
             $failed = (int) ( $queued[ $code ]->failed_count ?? 0 );
             $required = $done + $pending + $failed;
             $result[ $code ] = [
