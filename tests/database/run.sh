@@ -69,6 +69,7 @@ for home in http://gml-regression.test http://gml-regression.test/ygnaglul; do
     php "$ROOT/routing.php" request /fr/ home
     php "$ROOT/routing.php" request /it/ home
     php "$ROOT/resource-readiness.php"
+    php "$ROOT/readiness-durable.php"
     php "$ROOT/routing.php" cleanup
 done
 if [ -f "$GML_TEST_PRODUCT_DIR/tests/database/uninstall.php" ]; then

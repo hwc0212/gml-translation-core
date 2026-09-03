@@ -35,6 +35,29 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.7.1 Durable Readiness Invalidation
+
+Translation Memory changes now fail closed with one indexed database update:
+every current resource/language readiness row related to the changed source
+hash becomes `stale` before background work begins. The readiness table itself
+is the durable work ledger, replacing the single per-hash continuation option
+that could be overwritten when multiple hashes had more than 500 resources.
+
+A product-neutral worker claims at most 500 stale rows under the existing
+owner-token lease, computes the batch without AI or queue changes, and persists
+results in bounded multi-row writes. Claimed rows use an expiring `rebuilding`
+state, so a crashed process can delay completion but cannot leave a false
+`complete` result. A recurring recovery wakeup reclaims expired work after PHP,
+Cron, or server interruption. Concurrent invalidation wins over an older
+worker result, and overlapping hashes deduplicate through the existing unique
+resource/language row.
+
+Database schema version 3.0.1 adds only `status_id (status, id)` to the existing
+readiness table. Translation Memory, queue rows, manual translations, glossary,
+exclusions, routes, and public SEO output are unchanged. This remains
+infrastructure-only shadow readiness; it does not approve or publish a language
+variant.
+
 ## 0.7.0 Shadow Resource Readiness
 
 Adds an additive, database-authoritative resource manifest and readiness layer

@@ -6,6 +6,31 @@ final class GML_Resource_Readiness {
     const COMPLETE_RATIO = 0.95;
     const READ_CHUNK = 500;
     const REVERSE_BATCH = 500;
+    const REBUILD_BATCH = 500;
+    const REBUILD_HOOK = 'gml_resource_readiness_rebuild';
+    const REBUILD_LOCK = 'gml_resource_readiness_rebuild_lock';
+    const CLAIM_TTL = 180;
+
+    public static function register_hooks() {
+        add_action( self::REBUILD_HOOK, [ __CLASS__, 'run_rebuild_batch' ], 10, 1 );
+    }
+
+    /** Keep an infrequent recovery event; readiness rows, not Cron, own work state. */
+    public static function ensure_recovery_schedule() {
+        if ( ! GML_Resource_Manifest_Store::tables_ready() ) return false;
+        if ( ! wp_next_scheduled( self::REBUILD_HOOK, [ 'recovery' ] ) ) {
+            return false !== wp_schedule_event( time() + 300, 'hourly', self::REBUILD_HOOK, [ 'recovery' ] );
+        }
+        return true;
+    }
+
+    public static function schedule_rebuild() {
+        self::ensure_recovery_schedule();
+        if ( ! wp_next_scheduled( self::REBUILD_HOOK, [ 'drain' ] ) ) {
+            return false !== wp_schedule_single_event( time() + 5, self::REBUILD_HOOK, [ 'drain' ] );
+        }
+        return true;
+    }
 
     public static function get_status( $subject, $lang ) {
         $statuses = self::get_all_statuses( $subject );
@@ -136,56 +161,204 @@ final class GML_Resource_Readiness {
         return $written;
     }
 
-    /** Recalculate only resources related to a changed Translation Memory hash. */
+    /** Fail closed for every current resource related to a changed TM hash. */
     public static function translation_changed( $source_hash, $target_lang ) {
+        self::migrate_legacy_continuation();
+        return self::invalidate_translation_hash( $source_hash, $target_lang );
+    }
+
+    /** Convert the old single continuation into durable stale rows once. */
+    public static function migrate_legacy_continuation() {
+        $state = (array) get_option( 'gml_resource_readiness_reverse_state', [] );
+        if ( ! $state ) return 0;
+        $hash = strtolower( sanitize_text_field( $state['source_hash'] ?? '' ) );
+        $lang = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $state['target_lang'] ?? '' ) : sanitize_key( $state['target_lang'] ?? '' );
+        if ( ! preg_match( '/^[a-f0-9]{32}$/', $hash ) || $lang === '' ) {
+            delete_option( 'gml_resource_readiness_reverse_state' );
+            return 0;
+        }
+        $affected = self::invalidate_translation_hash( $hash, $lang );
+        if ( $affected !== false ) delete_option( 'gml_resource_readiness_reverse_state' );
+        return $affected === false ? 0 : (int) $affected;
+    }
+
+    private static function invalidate_translation_hash( $source_hash, $target_lang ) {
         global $wpdb;
         $source_hash = strtolower( sanitize_text_field( $source_hash ) );
         $target_lang = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $target_lang ) : sanitize_key( $target_lang );
         if ( ! preg_match( '/^[a-f0-9]{32}$/', $source_hash ) || $target_lang === '' || ! GML_Resource_Manifest_Store::tables_ready() ) return 0;
+        self::ensure_recovery_schedule();
+        $manifests = GML_Resource_Manifest_Store::manifest_table();
         $relations = GML_Resource_Manifest_Store::relation_table();
         $readiness = GML_Resource_Manifest_Store::readiness_table();
-        $ids = $wpdb->get_col( $wpdb->prepare(
-            "SELECT DISTINCT resource_id FROM $relations WHERE source_hash=%s ORDER BY resource_id ASC LIMIT %d",
-            $source_hash, self::REVERSE_BATCH + 1
+        $affected = $wpdb->query( $wpdb->prepare(
+            "UPDATE $readiness r
+             INNER JOIN $relations s ON s.resource_id=r.resource_id
+             INNER JOIN $manifests m ON m.id=s.resource_id AND m.manifest_generation=s.manifest_generation
+             SET r.status='stale',r.calculated_at=%s
+             WHERE s.source_hash=%s AND r.target_lang=%s",
+            current_time( 'mysql' ), $source_hash, $target_lang
         ) );
-        if ( ! $ids ) return 0;
-        $batch = array_slice( array_map( 'intval', $ids ), 0, self::REVERSE_BATCH );
-        $id_sql = implode( ',', $batch );
-        $wpdb->query( $wpdb->prepare( "UPDATE $readiness SET status='stale' WHERE target_lang=%s AND resource_id IN ($id_sql)", $target_lang ) );
-        self::recalculate_resources( $batch, [ $target_lang ] );
-        if ( count( $ids ) > self::REVERSE_BATCH ) {
-            update_option( 'gml_resource_readiness_reverse_state', [
-                'source_hash' => $source_hash, 'target_lang' => $target_lang, 'after_id' => end( $batch ), 'updated_at' => time(),
-            ], false );
-            if ( ! wp_next_scheduled( 'gml_resource_readiness_reverse' ) ) wp_schedule_single_event( time() + 5, 'gml_resource_readiness_reverse' );
-        }
-        return count( $batch );
+        if ( $affected === false ) return false;
+        if ( $affected > 0 ) self::schedule_rebuild();
+        return (int) $affected;
     }
 
+    /** Compatibility entry point for already-scheduled rc.13 reverse events. */
     public static function continue_reverse() {
+        self::migrate_legacy_continuation();
+        return self::run_rebuild_batch( 'legacy' );
+    }
+
+    /** Rebuild at most 500 durable stale resource/language rows. */
+    public static function run_rebuild_batch( $mode = '' ) {
+        unset( $mode );
+        if ( ! GML_Resource_Manifest_Store::tables_ready() ) return 0;
+        $token = GML_Atomic_Option_Lock::acquire( self::REBUILD_LOCK, self::CLAIM_TTL );
+        if ( $token === '' ) return 0;
+        try {
+            $ids = self::find_rebuild_candidates();
+            if ( ! $ids ) return 0;
+
+            // Persist the next wakeup before claiming rows. A process exit after
+            // this point leaves rebuilding rows recoverable without a cursor.
+            self::schedule_rebuild();
+            $ids = self::claim_rebuild_candidates( $ids );
+            if ( ! $ids ) return 0;
+            do_action( 'gml_resource_readiness_batch_claimed', count( $ids ) );
+            if ( ! GML_Atomic_Option_Lock::refresh( self::REBUILD_LOCK, $token, self::CLAIM_TTL ) ) return 0;
+
+            $rows = self::calculate_claimed_rows( $ids );
+            $written = self::persist_claimed_rows( $rows, $token );
+            if ( count( $ids ) >= self::REBUILD_BATCH ) self::schedule_rebuild();
+            return $written;
+        } finally {
+            GML_Atomic_Option_Lock::release( self::REBUILD_LOCK, $token );
+        }
+    }
+
+    private static function find_rebuild_candidates() {
         global $wpdb;
-        $state = (array) get_option( 'gml_resource_readiness_reverse_state', [] );
-        $hash = strtolower( sanitize_text_field( $state['source_hash'] ?? '' ) );
-        $lang = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $state['target_lang'] ?? '' ) : sanitize_key( $state['target_lang'] ?? '' );
-        $after = max( 0, (int) ( $state['after_id'] ?? 0 ) );
-        if ( ! preg_match( '/^[a-f0-9]{32}$/', $hash ) || $lang === '' ) { delete_option( 'gml_resource_readiness_reverse_state' ); return 0; }
-        $relations = GML_Resource_Manifest_Store::relation_table();
         $readiness = GML_Resource_Manifest_Store::readiness_table();
-        $ids = $wpdb->get_col( $wpdb->prepare(
-            "SELECT DISTINCT resource_id FROM $relations WHERE source_hash=%s AND resource_id>%d ORDER BY resource_id ASC LIMIT %d",
-            $hash, $after, self::REVERSE_BATCH + 1
+        $ids = array_map( 'intval', (array) $wpdb->get_col( $wpdb->prepare(
+            "SELECT id FROM $readiness USE INDEX (status_id) WHERE status='stale' ORDER BY id ASC LIMIT %d",
+            self::REBUILD_BATCH
+        ) ) );
+        $remaining = self::REBUILD_BATCH - count( $ids );
+        if ( $remaining < 1 ) return $ids;
+        $cutoff = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - self::CLAIM_TTL );
+        $expired = array_map( 'intval', (array) $wpdb->get_col( $wpdb->prepare(
+            "SELECT id FROM $readiness USE INDEX (status_id) WHERE status='rebuilding' AND calculated_at<=%s ORDER BY id ASC LIMIT %d",
+            $cutoff, $remaining
+        ) ) );
+        return array_values( array_unique( array_merge( $ids, $expired ) ) );
+    }
+
+    private static function claim_rebuild_candidates( array $ids ) {
+        global $wpdb;
+        $ids = array_values( array_unique( array_filter( array_map( 'intval', $ids ) ) ) );
+        if ( ! $ids ) return [];
+        $readiness = GML_Resource_Manifest_Store::readiness_table();
+        $id_sql = implode( ',', $ids );
+        $cutoff = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - self::CLAIM_TTL );
+        $claimed_at = current_time( 'mysql' );
+        $wpdb->query( $wpdb->prepare(
+            "UPDATE $readiness SET status='rebuilding',calculated_at=%s
+             WHERE id IN ($id_sql) AND (status='stale' OR (status='rebuilding' AND calculated_at<=%s))",
+            $claimed_at, $cutoff
         ) );
-        if ( ! $ids ) { delete_option( 'gml_resource_readiness_reverse_state' ); return 0; }
-        $batch = array_slice( array_map( 'intval', $ids ), 0, self::REVERSE_BATCH );
-        $id_sql = implode( ',', $batch );
-        $wpdb->query( $wpdb->prepare( "UPDATE $readiness SET status='stale' WHERE target_lang=%s AND resource_id IN ($id_sql)", $lang ) );
-        self::recalculate_resources( $batch, [ $lang ] );
-        if ( count( $ids ) > self::REVERSE_BATCH ) {
-            $state['after_id'] = end( $batch ); $state['updated_at'] = time();
-            update_option( 'gml_resource_readiness_reverse_state', $state, false );
-            wp_schedule_single_event( time() + 5, 'gml_resource_readiness_reverse' );
-        } else delete_option( 'gml_resource_readiness_reverse_state' );
-        return count( $batch );
+        return array_map( 'intval', (array) $wpdb->get_col(
+            "SELECT id FROM $readiness WHERE id IN ($id_sql) AND status='rebuilding' AND calculated_at='" . esc_sql( $claimed_at ) . "'"
+        ) );
+    }
+
+    private static function calculate_claimed_rows( array $ids ) {
+        global $wpdb;
+        if ( ! $ids ) return [];
+        $readiness = GML_Resource_Manifest_Store::readiness_table();
+        $manifests = GML_Resource_Manifest_Store::manifest_table();
+        $relations = GML_Resource_Manifest_Store::relation_table();
+        $index = $wpdb->prefix . 'gml_index';
+        $id_sql = implode( ',', array_map( 'intval', $ids ) );
+        $source = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( get_option( 'gml_source_lang', 'en' ) ) : 'en';
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT r.id,r.resource_id,r.target_lang,m.manifest_generation,m.global_generation AS manifest_global_generation,
+                    m.discovery_state,m.required_count,m.critical_count,
+                    COUNT(DISTINCT CASE WHEN i.id IS NOT NULL THEN s.source_hash END) AS translated_count,
+                    COALESCE(SUM(CASE WHEN s.critical=1 AND i.id IS NULL THEN 1 ELSE 0 END),0) AS critical_missing
+             FROM $readiness r
+             INNER JOIN $manifests m ON m.id=r.resource_id
+             LEFT JOIN $relations s ON s.resource_id=m.id AND s.manifest_generation=m.manifest_generation
+             LEFT JOIN $index i ON i.source_hash=s.source_hash AND i.source_lang=%s AND i.target_lang=r.target_lang AND i.status IN ('auto','manual')
+             WHERE r.id IN ($id_sql) AND r.status='rebuilding'
+             GROUP BY r.id,r.resource_id,r.target_lang,m.manifest_generation,m.global_generation,m.discovery_state,m.required_count,m.critical_count",
+            $source
+        ) );
+        $result = [];
+        foreach ( (array) $rows as $row ) {
+            $required = (int) $row->required_count;
+            $translated = (int) $row->translated_count;
+            $critical_missing = (int) $row->critical_missing;
+            $manifest_state = self::manifest_state( $row );
+            if ( $row->target_lang === $source ) {
+                $translated = $required;
+                $critical_missing = 0;
+                $status = $manifest_state;
+            } elseif ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $row->target_lang ) ) {
+                $translated = 0;
+                $critical_missing = (int) $row->critical_count;
+                $status = 'external_unverified';
+            } elseif ( $manifest_state !== 'complete' ) {
+                $translated = 0;
+                $critical_missing = (int) $row->critical_count;
+                $status = $manifest_state;
+            } else {
+                $status = $critical_missing === 0 && ( $required === 0 || $translated / $required >= self::COMPLETE_RATIO ) ? 'complete' : 'incomplete';
+            }
+            $result[] = [
+                'id' => (int) $row->id,
+                'resource_id' => (int) $row->resource_id,
+                'target_lang' => (string) $row->target_lang,
+                'manifest_generation' => (int) $row->manifest_generation,
+                'global_generation' => (int) $row->manifest_global_generation,
+                'required_count' => $required,
+                'translated_count' => $translated,
+                'critical_missing_count' => $critical_missing,
+                'status' => $status,
+            ];
+        }
+        return $result;
+    }
+
+    private static function persist_claimed_rows( array $rows, $token ) {
+        global $wpdb;
+        $readiness = GML_Resource_Manifest_Store::readiness_table();
+        $written = 0;
+        foreach ( array_chunk( $rows, 100 ) as $chunk ) {
+            if ( ! GML_Atomic_Option_Lock::refresh( self::REBUILD_LOCK, $token, self::CLAIM_TTL ) ) break;
+            $values = [];
+            $args = [];
+            $now = current_time( 'mysql' );
+            foreach ( $chunk as $row ) {
+                $values[] = '(%d,%d,%s,%d,%d,%d,%d,%d,%s,%s)';
+                array_push( $args, $row['id'], $row['resource_id'], $row['target_lang'], $row['manifest_generation'], $row['global_generation'], $row['required_count'], $row['translated_count'], $row['critical_missing_count'], $row['status'], $now );
+            }
+            $sql = $wpdb->prepare(
+                "INSERT INTO $readiness (id,resource_id,target_lang,manifest_generation,global_generation,required_count,translated_count,critical_missing_count,status,calculated_at) VALUES " . implode( ',', $values ) .
+                " ON DUPLICATE KEY UPDATE
+                    manifest_generation=IF(status='rebuilding',VALUES(manifest_generation),manifest_generation),
+                    global_generation=IF(status='rebuilding',VALUES(global_generation),global_generation),
+                    required_count=IF(status='rebuilding',VALUES(required_count),required_count),
+                    translated_count=IF(status='rebuilding',VALUES(translated_count),translated_count),
+                    critical_missing_count=IF(status='rebuilding',VALUES(critical_missing_count),critical_missing_count),
+                    calculated_at=IF(status='rebuilding',VALUES(calculated_at),calculated_at),
+                    status=IF(status='rebuilding',VALUES(status),status)",
+                $args
+            );
+            if ( false === $wpdb->query( $sql ) ) break;
+            $written += count( $chunk );
+        }
+        return $written;
     }
 
     private static function effective_status( $row ) {

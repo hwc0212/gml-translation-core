@@ -23,6 +23,7 @@ final class GML_Resource_Manifest_Manager {
         add_action( 'updated_option', [ __CLASS__, 'option_changed' ], 40, 3 );
         add_action( self::DIRTY_HOOK, [ __CLASS__, 'process_dirty' ] );
         add_action( 'gml_resource_readiness_reverse', [ __CLASS__, 'process_reverse' ] );
+        GML_Resource_Readiness::register_hooks();
         GML_Resource_Backfill::register_hooks();
         add_action( 'wp_loaded', [ __CLASS__, 'maybe_schedule' ] );
     }
@@ -123,6 +124,8 @@ final class GML_Resource_Manifest_Manager {
 
     public static function maybe_schedule() {
         if ( ! GML_Resource_Manifest_Store::tables_ready() ) return;
+        GML_Resource_Readiness::migrate_legacy_continuation();
+        GML_Resource_Readiness::ensure_recovery_schedule();
         if ( get_option( self::DIRTY_OPTION, [] ) && ! wp_next_scheduled( self::DIRTY_HOOK ) ) wp_schedule_single_event( time() + 15, self::DIRTY_HOOK );
         GML_Resource_Backfill::maybe_schedule();
     }

@@ -182,6 +182,8 @@ gml_db_assert( GML_Resource_Readiness::get_status( $resource_b, 'qa' ) === 'inco
 $translator = new GML_Translator();
 $last = $nodes_b[94];
 gml_db_assert( true === $translator->save_to_index( $last['hash'], $last['text'], 'Manual QA text', 'en', 'qa', 'text', 'manual' ), 'manual Translation Memory row saved' );
+gml_db_assert( GML_Resource_Readiness::get_status( $resource_b, 'qa' ) === 'stale', 'manual Translation Memory save fails closed before asynchronous readiness rebuild' );
+GML_Resource_Readiness::run_rebuild_batch( 'test' );
 gml_db_assert( GML_Resource_Readiness::get_status( $resource_b, 'qa' ) === 'complete', 'manual Translation Memory reaches 95 percent without AI' );
 
 // Removing a source relation does not delete historical Translation Memory.
@@ -217,10 +219,16 @@ gml_db_assert( $relation_count === 100, 'one shared hash creates 100 resource re
 gml_db_assert( true === $translator->save_to_index( md5( $shared_text ), $shared_text, 'QA shared text', 'en', 'qa', 'text', 'auto' ), 'shared translation asset saved once' );
 $asset_count = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $index_table WHERE source_hash=%s AND source_lang='en' AND target_lang='qa'", md5( $shared_text ) ) );
 gml_db_assert( $asset_count === 1, 'shared hash remains one Translation Memory asset' );
+$shared_stale = GML_Resource_Readiness::get_bulk_statuses( $shared_resources, [ 'qa' ] );
+gml_db_assert( count( array_filter( $shared_stale, static function( $row ) { return ( $row['qa'] ?? '' ) === 'stale'; } ) ) === 100, 'one shared Translation Memory save fails closed for all 100 related resources' );
+GML_Resource_Readiness::run_rebuild_batch( 'test' );
 $shared_statuses = GML_Resource_Readiness::get_bulk_statuses( $shared_resources, [ 'qa' ] );
 gml_db_assert( count( array_filter( $shared_statuses, static function( $row ) { return ( $row['qa'] ?? '' ) === 'complete'; } ) ) === 100, 'one translation recalculates all 100 related resources' );
 $wpdb->delete( $index_table, [ 'source_hash' => md5( $shared_text ), 'source_lang' => 'en', 'target_lang' => 'qa' ] );
 GML_Resource_Readiness::translation_changed( md5( $shared_text ), 'qa' );
+$shared_stale_after_delete = GML_Resource_Readiness::get_bulk_statuses( $shared_resources, [ 'qa' ] );
+gml_db_assert( count( array_filter( $shared_stale_after_delete, static function( $row ) { return ( $row['qa'] ?? '' ) === 'stale'; } ) ) === 100, 'deleting one Translation Memory asset fails closed before asynchronous rebuild' );
+GML_Resource_Readiness::run_rebuild_batch( 'test' );
 $shared_after_delete = GML_Resource_Readiness::get_bulk_statuses( $shared_resources, [ 'qa' ] );
 gml_db_assert( count( array_filter( $shared_after_delete, static function( $row ) { return ( $row['qa'] ?? '' ) === 'incomplete'; } ) ) === 100, 'deleting one Translation Memory asset recalculates all related resources without duplicate queue jobs' );
 

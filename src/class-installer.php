@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '3.0.0';
+    const DB_VERSION = '3.0.1';
     const ERROR_OPTION = 'gml_translation_db_error';
 
     public static function register_hooks() {
@@ -56,6 +56,7 @@ class GML_Installer {
             $old_timeout = (int) $wpdb->get_var( 'SELECT @@SESSION.lock_wait_timeout' );
             self::execute( 'SET SESSION lock_wait_timeout = 2' );
             self::create_tables();
+            self::ensure_resource_readiness_index();
             self::set_default_options();
             self::disable_large_option_autoload();
             self::create_cache_directory();
@@ -86,7 +87,7 @@ class GML_Installer {
         global $wpdb;
         $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
         if ( $wpdb->last_error !== '' ) throw new RuntimeException( 'table_check_failed' );
-        // Existing schemas are supported without ALTER, deduplication, or data deletion.
+        // Legacy translation schemas are never altered or deduplicated here.
         if ( $exists !== $table ) self::execute( $sql );
     }
 
@@ -96,6 +97,7 @@ class GML_Installer {
         wp_clear_scheduled_hook( 'gml_resource_manifest_backfill' );
         wp_clear_scheduled_hook( 'gml_resource_manifest_dirty' );
         wp_clear_scheduled_hook( 'gml_resource_readiness_reverse' );
+        wp_clear_scheduled_hook( 'gml_resource_readiness_rebuild' );
         // NOTE: We intentionally keep gml_crawl_running and gml_crawl_total
         // in the database. WordPress calls deactivate → activate during plugin
         // updates, and clearing these options would silently abort an in-progress
@@ -188,6 +190,7 @@ class GML_Installer {
             PRIMARY KEY (id),
             UNIQUE KEY resource_language (resource_id, target_lang),
             KEY language_status (target_lang, status),
+            KEY status_id (status, id),
             KEY resource_generation (resource_id, manifest_generation, global_generation)
         ) $cc;" );
 
@@ -212,6 +215,18 @@ class GML_Installer {
             KEY idx_hash (source_hash)
         ) $cc;" );
 
+    }
+
+    /** Add only the worker index introduced after the Phase 2B tables. */
+    private static function ensure_resource_readiness_index() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'gml_resource_readiness';
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+        if ( $wpdb->last_error !== '' ) throw new RuntimeException( 'readiness_table_check_failed' );
+        if ( $exists !== $table ) return;
+        $index = $wpdb->get_var( "SHOW INDEX FROM $table WHERE Key_name='status_id'", 2 );
+        if ( $wpdb->last_error !== '' ) throw new RuntimeException( 'readiness_index_check_failed' );
+        if ( $index === null ) self::execute( "ALTER TABLE $table ADD KEY status_id (status, id)" );
     }
 
     // ── Default options ───────────────────────────────────────────────────────
