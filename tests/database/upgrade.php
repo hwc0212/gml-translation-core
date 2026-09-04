@@ -8,6 +8,10 @@ $wpdb->query( "DROP TABLE IF EXISTS $queue, $index" );
 delete_option( 'gml_db_version' );
 gml_db_assert( GML_Installer::activate() === true, 'fresh installation succeeds' );
 gml_db_assert( $wpdb->get_var( "SHOW INDEX FROM $queue WHERE Key_name = 'queue_hash_lang'" ) !== null, 'fresh queue has a unique key' );
+foreach ( [ 'gml_resource_translation_versions', 'gml_resource_reviews', 'gml_resource_review_audit' ] as $suffix ) {
+    $table = $wpdb->prefix . $suffix;
+    gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table, 'fresh install creates ' . $suffix );
+}
 $wpdb->query( "ALTER TABLE $queue DROP INDEX queue_hash_lang" );
 $wpdb->query( "INSERT INTO $queue (source_hash, source_text, source_lang, target_lang, context_type, status, created_at)
     SELECT MD5(CONCAT('old-', MOD(seq, 65000))), CONCAT('Legacy ', seq), 'en', 'de', 'text', 'pending', NOW()

@@ -4,6 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${GML_TEST_PRODUCT_DIR:?Product checkout required}"
 : "${GML_TEST_WP_ROOT:?Disposable WordPress installation required}"
 test "${GML_DATABASE_TESTS:-}" = 1
+php "$ROOT/preflight.php"
 php "$ROOT/upgrade.php"
 php "$ROOT/request-context.php" ajax
 php "$ROOT/request-context.php" cron
@@ -71,6 +72,7 @@ for home in http://gml-regression.test http://gml-regression.test/ygnaglul; do
     php "$ROOT/resource-readiness.php"
     php "$ROOT/readiness-durable.php"
     php "$ROOT/current-corpus-readiness.php"
+    php "$ROOT/resource-approval.php"
     php "$ROOT/routing.php" cleanup
 done
 if [ -f "$GML_TEST_PRODUCT_DIR/tests/database/uninstall.php" ]; then

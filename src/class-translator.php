@@ -210,30 +210,32 @@ class GML_Translation_Translator {
         $target_lang = sanitize_key( $target_lang );
         $status      = $status === 'manual' ? 'manual' : 'auto';
 
-        if ( $status === 'auto' ) {
-            $existing = $wpdb->get_var( $wpdb->prepare(
-                "SELECT status FROM $table WHERE source_hash = %s AND source_lang = %s AND target_lang = %s",
-                $hash,
-                $source_lang,
-                $target_lang
-            ) );
-            if ( $existing === 'manual' ) {
-                if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::translation_changed( $hash, $target_lang );
-                return true;
-            }
+        $existing = $wpdb->get_row( $wpdb->prepare(
+            "SELECT status,translated_text FROM $table WHERE source_hash = %s AND source_lang = %s AND target_lang = %s",
+            $hash,
+            $source_lang,
+            $target_lang
+        ) );
+        if ( $status === 'auto' && $existing && $existing->status === 'manual' ) {
+            return true;
         }
-
-        $saved = $wpdb->replace( $table, [
-            'source_hash'     => $hash,
-            'source_text'     => (string) $source_text,
-            'source_lang'     => $source_lang,
-            'target_lang'     => $target_lang,
-            'translated_text' => (string) $translated_text,
-            'context_type'    => sanitize_key( $context_type ) ?: 'text',
-            'status'          => $status,
-            'created_at'      => current_time( 'mysql' ),
-            'updated_at'      => current_time( 'mysql' ),
-        ] );
+        $public_text_changes = ! $existing || ! hash_equals( (string) $existing->translated_text, (string) $translated_text );
+        $write = static function () use ( $wpdb, $table, $hash, $source_text, $source_lang, $target_lang, $translated_text, $context_type, $status ) {
+            return $wpdb->replace( $table, [
+                'source_hash'     => $hash,
+                'source_text'     => (string) $source_text,
+                'source_lang'     => $source_lang,
+                'target_lang'     => $target_lang,
+                'translated_text' => (string) $translated_text,
+                'context_type'    => sanitize_key( $context_type ) ?: 'text',
+                'status'          => $status,
+                'created_at'      => current_time( 'mysql' ),
+                'updated_at'      => current_time( 'mysql' ),
+            ] );
+        };
+        $saved = $public_text_changes && class_exists( 'GML_Resource_Readiness' )
+            ? GML_Resource_Readiness::apply_translation_change( $hash, $target_lang, $write )
+            : $write();
         if ( false === $saved ) {
             return false;
         }
@@ -247,7 +249,6 @@ class GML_Translation_Translator {
 			unset( self::$known_missing[ $pair ][ $hash ] );
         }
         wp_cache_delete( 'gml_dict_' . $source_lang . '_' . $target_lang, 'gml_translate' );
-        if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::translation_changed( $hash, $target_lang );
         return true;
     }
 

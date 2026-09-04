@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '3.0.1';
+    const DB_VERSION = '3.1.0';
     const ERROR_OPTION = 'gml_translation_db_error';
 
     public static function register_hooks() {
@@ -192,6 +192,62 @@ class GML_Installer {
             KEY language_status (target_lang, status),
             KEY status_id (status, id),
             KEY resource_generation (resource_id, manifest_generation, global_generation)
+        ) $cc;" );
+
+        // Human review is deliberately separate from machine readiness. The
+        // current row is cheap to read; the append-only audit table preserves
+        // every explicit decision without copying source or translated text.
+        $t = $wpdb->prefix . 'gml_resource_translation_versions';
+        self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            resource_id BIGINT UNSIGNED NOT NULL,
+            target_lang VARCHAR(10) NOT NULL,
+            generation BIGINT UNSIGNED NOT NULL DEFAULT 1,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY resource_language (resource_id, target_lang),
+            KEY language_generation (target_lang, generation)
+        ) $cc;" );
+
+        $t = $wpdb->prefix . 'gml_resource_reviews';
+        self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            resource_id BIGINT UNSIGNED NOT NULL,
+            target_lang VARCHAR(10) NOT NULL,
+            decision VARCHAR(16) NOT NULL,
+            manifest_generation BIGINT UNSIGNED NOT NULL,
+            manifest_fingerprint CHAR(64) NOT NULL,
+            global_generation BIGINT UNSIGNED NOT NULL,
+            translation_generation BIGINT UNSIGNED NOT NULL,
+            reviewer_user_id BIGINT UNSIGNED NOT NULL,
+            review_note TEXT NOT NULL,
+            reviewed_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY resource_language (resource_id, target_lang),
+            KEY decision_language (decision, target_lang),
+            KEY reviewer_user (reviewer_user_id)
+        ) $cc;" );
+
+        $t = $wpdb->prefix . 'gml_resource_review_audit';
+        self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            resource_id BIGINT UNSIGNED NOT NULL,
+            resource_key VARCHAR(191) NOT NULL,
+            target_lang VARCHAR(10) NOT NULL,
+            decision VARCHAR(16) NOT NULL,
+            manifest_generation BIGINT UNSIGNED NOT NULL,
+            manifest_fingerprint CHAR(64) NOT NULL,
+            global_generation BIGINT UNSIGNED NOT NULL,
+            translation_generation BIGINT UNSIGNED NOT NULL,
+            machine_status VARCHAR(24) NOT NULL,
+            actor_user_id BIGINT UNSIGNED NOT NULL,
+            review_note TEXT NOT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY resource_language_id (resource_id, target_lang, id),
+            KEY resource_key_id (resource_key, id),
+            KEY actor_created (actor_user_id, created_at)
         ) $cc;" );
 
         // Async translation queue

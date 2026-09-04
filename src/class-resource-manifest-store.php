@@ -40,11 +40,33 @@ final class GML_Resource_Manifest_Store {
         ksort( $strings );
         $fingerprint = hash( 'sha256', wp_json_encode( $strings ) );
         $manifest = self::get_by_key( $resource->get_key() );
-        $generation = $manifest ? (int) $manifest->manifest_generation + 1 : 1;
         $global = class_exists( 'GML_Resource_Manifest_Manager' ) ? GML_Resource_Manifest_Manager::global_generation() : 1;
         $now = current_time( 'mysql' );
         $manifests = self::manifest_table();
         $relations = self::relation_table();
+
+        // A repeated authoritative scan of the exact same source snapshot must
+        // not revoke a human approval. Real source revisions, manifest content,
+        // URL identity, or global presentation changes still advance the
+        // generation and require a fresh review.
+        $unchanged = $manifest
+            && hash_equals( (string) $manifest->manifest_fingerprint, $fingerprint )
+            && hash_equals( (string) $manifest->source_revision, $resource->get_source_revision() )
+            && hash_equals( (string) $manifest->source_url_hash, $resource->get_source_url_hash() )
+            && (int) $manifest->global_generation === (int) $global
+            && (int) $manifest->required_count === count( $strings )
+            && (int) $manifest->critical_count === count( array_filter( $strings, static function( $row ) { return ! empty( $row['critical'] ); } ) );
+        if ( $unchanged ) {
+            $saved = $wpdb->update( $manifests, [
+                'discovery_state' => 'complete', 'updated_at' => $now, 'discovered_at' => $now,
+            ], [ 'id' => (int) $manifest->id ] );
+            if ( false === $saved ) return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be refreshed.' );
+            if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::recalculate_resources( [ (int) $manifest->id ] );
+            self::clear_language_readiness();
+            return true;
+        }
+
+        $generation = $manifest ? (int) $manifest->manifest_generation + 1 : 1;
 
         $wpdb->query( 'START TRANSACTION' );
         try {

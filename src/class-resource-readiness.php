@@ -55,10 +55,10 @@ final class GML_Resource_Readiness {
         $result = [];
         foreach ( $rows as $row ) {
             if ( $row->target_lang === null ) continue;
-            $result[ $row->target_lang ] = self::effective_status( $row );
+            $result[ $row->target_lang ] = self::evaluate_status_row( $row );
         }
         if ( ! $result ) {
-            foreach ( self::configured_languages() as $lang ) $result[ $lang ] = self::manifest_state( $rows[0] );
+            foreach ( self::configured_languages() as $lang ) $result[ $lang ] = self::evaluate_manifest_row( $rows[0] );
         }
         return $result;
     }
@@ -93,12 +93,12 @@ final class GML_Resource_Readiness {
             foreach ( (array) $rows as $row ) {
                 $seen[ $row->resource_key ] = $row;
                 if ( $row->target_lang !== null && ( ! $languages || in_array( $row->target_lang, $languages, true ) ) ) {
-                    $result[ $row->resource_key ][ $row->target_lang ] = self::effective_status( $row );
+                    $result[ $row->resource_key ][ $row->target_lang ] = self::evaluate_status_row( $row );
                 }
             }
             foreach ( $seen as $key => $row ) {
                 foreach ( $languages as $lang ) {
-                    if ( $result[ $key ][ $lang ] === 'unknown' ) $result[ $key ][ $lang ] = self::manifest_state( $row );
+                    if ( $result[ $key ][ $lang ] === 'unknown' ) $result[ $key ][ $lang ] = self::evaluate_manifest_row( $row );
                 }
             }
         }
@@ -125,7 +125,7 @@ final class GML_Resource_Readiness {
                 if ( $lang === $source ) {
                     $translated = (int) $manifest->required_count;
                     $critical_missing = 0;
-                    $status = self::manifest_state( $manifest ) === 'complete' ? 'complete' : self::manifest_state( $manifest );
+                    $status = self::evaluate_manifest_row( $manifest ) === 'complete' ? 'complete' : self::evaluate_manifest_row( $manifest );
                 } elseif ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $lang ) ) {
                     $translated = 0;
                     $critical_missing = (int) $manifest->critical_count;
@@ -133,7 +133,7 @@ final class GML_Resource_Readiness {
                 } elseif ( $manifest->discovery_state !== 'complete' || (int) $manifest->global_generation !== self::global_generation() ) {
                     $translated = 0;
                     $critical_missing = (int) $manifest->critical_count;
-                    $status = self::manifest_state( $manifest );
+                    $status = self::evaluate_manifest_row( $manifest );
                 } else {
                     $counts = $wpdb->get_row( $wpdb->prepare(
                         "SELECT COUNT(DISTINCT CASE WHEN i.id IS NOT NULL THEN s.source_hash END) AS translated_count,
@@ -167,6 +167,16 @@ final class GML_Resource_Readiness {
         return self::invalidate_translation_hash( $source_hash, $target_lang );
     }
 
+    /**
+     * Atomically mutate one translation and invalidate every dependent
+     * readiness/approval snapshot. The callback must return false on failure.
+     */
+    public static function apply_translation_change( $source_hash, $target_lang, $mutation ) {
+        if ( ! is_callable( $mutation ) ) return false;
+        self::migrate_legacy_continuation();
+        return self::invalidate_translation_hash( $source_hash, $target_lang, $mutation, true );
+    }
+
     /** Convert the old single continuation into durable stale rows once. */
     public static function migrate_legacy_continuation() {
         $state = (array) get_option( 'gml_resource_readiness_reverse_state', [] );
@@ -182,26 +192,43 @@ final class GML_Resource_Readiness {
         return $affected === false ? 0 : (int) $affected;
     }
 
-    private static function invalidate_translation_hash( $source_hash, $target_lang ) {
+    private static function invalidate_translation_hash( $source_hash, $target_lang, $mutation = null, $return_mutation = false ) {
         global $wpdb;
         $source_hash = strtolower( sanitize_text_field( $source_hash ) );
         $target_lang = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $target_lang ) : sanitize_key( $target_lang );
-        if ( ! preg_match( '/^[a-f0-9]{32}$/', $source_hash ) || $target_lang === '' || ! GML_Resource_Manifest_Store::tables_ready() ) return 0;
+        $mutation = is_callable( $mutation ) ? $mutation : null;
+        if ( ! preg_match( '/^[a-f0-9]{32}$/', $source_hash ) || $target_lang === '' || ! GML_Resource_Manifest_Store::tables_ready() ) {
+            if ( $mutation ) return call_user_func( $mutation );
+            return 0;
+        }
         self::ensure_recovery_schedule();
         $manifests = GML_Resource_Manifest_Store::manifest_table();
         $relations = GML_Resource_Manifest_Store::relation_table();
         $readiness = GML_Resource_Manifest_Store::readiness_table();
-        $affected = $wpdb->query( $wpdb->prepare(
-            "UPDATE $readiness r
-             INNER JOIN $relations s ON s.resource_id=r.resource_id
-             INNER JOIN $manifests m ON m.id=s.resource_id AND m.manifest_generation=s.manifest_generation
-             SET r.status='stale',r.calculated_at=%s
-             WHERE s.source_hash=%s AND r.target_lang=%s",
-            current_time( 'mysql' ), $source_hash, $target_lang
-        ) );
-        if ( $affected === false ) return false;
+        $track_reviews = class_exists( 'GML_Resource_Approval' ) && GML_Resource_Approval::tables_ready();
+        if ( false === $wpdb->query( 'START TRANSACTION' ) ) return false;
+        try {
+            $affected = $wpdb->query( $wpdb->prepare(
+                "UPDATE $readiness r
+                 INNER JOIN $relations s ON s.resource_id=r.resource_id
+                 INNER JOIN $manifests m ON m.id=s.resource_id AND m.manifest_generation=s.manifest_generation
+                 SET r.status='stale',r.calculated_at=%s
+                 WHERE s.source_hash=%s AND r.target_lang=%s",
+                current_time( 'mysql' ), $source_hash, $target_lang
+            ) );
+            if ( $affected === false ) throw new RuntimeException( 'readiness_invalidation_failed' );
+            if ( $track_reviews && false === GML_Resource_Approval::bump_translation_generations( $source_hash, $target_lang ) ) {
+                throw new RuntimeException( 'approval_invalidation_failed' );
+            }
+            $mutation_result = $mutation ? call_user_func( $mutation ) : true;
+            if ( $mutation_result === false ) throw new RuntimeException( 'translation_mutation_failed' );
+            if ( false === $wpdb->query( 'COMMIT' ) ) throw new RuntimeException( 'translation_commit_failed' );
+        } catch ( Throwable $error ) {
+            $wpdb->query( 'ROLLBACK' );
+            return false;
+        }
         if ( $affected > 0 ) self::schedule_rebuild();
-        return (int) $affected;
+        return $return_mutation ? $mutation_result : (int) $affected;
     }
 
     /** Compatibility entry point for already-scheduled rc.13 reverse events. */
@@ -299,7 +326,7 @@ final class GML_Resource_Readiness {
             $required = (int) $row->required_count;
             $translated = (int) $row->translated_count;
             $critical_missing = (int) $row->critical_missing;
-            $manifest_state = self::manifest_state( $row );
+            $manifest_state = self::evaluate_manifest_row( $row );
             if ( $row->target_lang === $source ) {
                 $translated = $required;
                 $critical_missing = 0;
@@ -361,15 +388,18 @@ final class GML_Resource_Readiness {
         return $written;
     }
 
-    private static function effective_status( $row ) {
-        $manifest = self::manifest_state( $row );
+    /** Evaluate one manifest/readiness join row without another database read. */
+    public static function evaluate_status_row( $row ) {
+        $manifest = self::evaluate_manifest_row( $row );
         if ( $manifest !== 'complete' ) return $manifest;
+        if ( ! isset( $row->target_lang ) || $row->target_lang === null ) return 'unknown';
         if ( (int) $row->readiness_manifest_generation !== (int) $row->manifest_generation
             || (int) $row->readiness_global_generation !== (int) $row->manifest_global_generation ) return 'stale';
         return (string) $row->status;
     }
 
-    private static function manifest_state( $row ) {
+    /** Evaluate the discovery half of a manifest/readiness join row. */
+    public static function evaluate_manifest_row( $row ) {
         $state = (string) ( $row->discovery_state ?? 'unknown' );
         if ( $state === 'complete' && (int) ( $row->manifest_global_generation ?? $row->global_generation ?? 0 ) !== self::global_generation() ) return 'stale';
         return in_array( $state, [ 'complete', 'incomplete', 'stale', 'unknown', 'disabled', 'excluded', 'render_error', 'external_unverified' ], true ) ? $state : 'unknown';

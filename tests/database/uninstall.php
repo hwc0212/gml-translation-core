@@ -10,6 +10,9 @@ $queue = $wpdb->prefix . 'gml_queue';
 $manifest = $wpdb->prefix . 'gml_resource_manifests';
 $relations = $wpdb->prefix . 'gml_resource_strings';
 $readiness = $wpdb->prefix . 'gml_resource_readiness';
+$review_versions = $wpdb->prefix . 'gml_resource_translation_versions';
+$reviews = $wpdb->prefix . 'gml_resource_reviews';
+$review_audit = $wpdb->prefix . 'gml_resource_review_audit';
 
 update_option( 'gml_source_lang', 'en', false );
 update_option( 'gml_languages', [ [ 'code' => 'es' ] ], false );
@@ -31,6 +34,9 @@ gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $queue ) )
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $manifest ) ) === $manifest, 'default uninstall preserves shadow resource manifests' );
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $relations ) ) === $relations, 'default uninstall preserves resource-string relationships' );
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $readiness ) ) === $readiness, 'default uninstall preserves machine-readiness snapshots' );
+gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $review_versions ) ) === $review_versions, 'default uninstall preserves review translation generations' );
+gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $reviews ) ) === $reviews, 'default uninstall preserves current review decisions' );
+gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $review_audit ) ) === $review_audit, 'default uninstall preserves review audit history' );
 gml_db_assert( get_option( 'gml_source_lang' ) === 'en', 'default uninstall preserves translation settings' );
 gml_db_assert( wp_next_scheduled( 'gml_process_queue', [ 'fixture' ] ) === false, 'default uninstall removes scheduled jobs with arguments' );
 gml_db_assert( get_transient( 'gml_page_uninstall_fixture' ) === false, 'default uninstall removes rendered page cache' );
@@ -53,6 +59,9 @@ gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $queue ) )
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $manifest ) ) !== $manifest, 'complete removal drops shadow resource manifests' );
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $relations ) ) !== $relations, 'complete removal drops resource-string relationships' );
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $readiness ) ) !== $readiness, 'complete removal drops machine-readiness snapshots' );
+gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $review_versions ) ) !== $review_versions, 'complete removal drops review translation generations' );
+gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $reviews ) ) !== $reviews, 'complete removal drops current review decisions' );
+gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $review_audit ) ) !== $review_audit, 'complete removal drops review audit history' );
 gml_db_assert( get_option( 'gml_source_lang', false ) === false, 'complete removal deletes translation settings' );
 gml_db_assert( get_option( 'gml_translate_uninstall_delete_data', false ) === false, 'complete removal deletes its own retention preference' );
 gml_db_assert( get_option( 'gml_seo_uninstall_fixture' ) === 'keep', 'translation cleanup preserves GML SEO options' );

@@ -35,6 +35,28 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.8.0 Human Review and Snapshot Approval
+
+Phase 2C adds a product-neutral human-review layer above machine readiness.
+Machine-complete resources remain unreviewed until an administrator explicitly
+approves or rejects one exact resource/language snapshot. Decisions bind to the
+manifest generation, manifest fingerprint, global generation, and translation
+generation; any real source or translated-text change makes the old decision
+stale. Identical authoritative rescans preserve the current decision.
+
+The additive schema stores a cheap current decision, a translation generation,
+and append-only audit events. Audit rows contain identifiers, fingerprints,
+decision metadata, and notes, but never copy source or translated page text.
+Translation writes, readiness invalidation, and approval-generation changes are
+committed atomically, so a failed write cannot leave a new translation with an
+old approval or a partial invalidation. Phase 2C does not alter routing, public
+visibility, canonical output, hreflang, or sitemaps; those remain a later
+publication-eligibility cutover.
+
+The real-database suite now performs a direct MariaDB preflight before loading
+WordPress, preventing a WordPress database error page with exit code zero from
+being mistaken for a successful regression run.
+
 ## 0.7.2 Current-Corpus Queue and Readiness
 
 Language progress, public language readiness, normal queue batches, limited
