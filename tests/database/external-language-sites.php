@@ -44,10 +44,11 @@ gml_db_assert( GML_URL_Helper::get_external_hreflang_url( $source_url, 'de' ) ==
 
 $provider = new GML_Translation_Provider();
 $alternates = $provider->get_alternate_urls( home_url( '/products/example/' ) );
-gml_db_assert( ( $alternates['zh-CN'] ?? '' ) === 'https://cnxhe.cn/products/example/', 'provider exposes a same-path external hreflang URL' );
-gml_db_assert( ! isset( $alternates['de'] ), 'provider omits a homepage-only external language from inner-page hreflang' );
+gml_db_assert( $alternates === [], 'provider fails closed when a URL has no resource manifest' );
 $home_alternates = $provider->get_alternate_urls( home_url( '/' ) );
-gml_db_assert( ( $home_alternates['de'] ?? '' ) === 'https://de.example.test/', 'provider exposes homepage-only hreflang on the source homepage' );
+gml_db_assert( ! isset( $home_alternates['zh-CN'] ) && ! isset( $home_alternates['de'] ), 'unverified external targets never enter public hreflang output' );
+$external_status = $provider->get_public_status( GML_Resource_Identity::front_page(), 'zh' );
+gml_db_assert( ! $external_status['public_eligible'] && $external_status['reason'] === 'external_unverified', 'external target remains explicitly unverified until a cross-site protocol exists' );
 gml_db_assert( GML_Translation_Queue_Scope::enabled_languages() === [ 'es' ], 'AI queue scope excludes external language sites' );
 
 gml_db_assert( GML_Language_Utils::sanitize_external_site_url( 'http://cnxhe.cn/' ) === '', 'external site configuration rejects HTTP' );

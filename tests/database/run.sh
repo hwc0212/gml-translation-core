@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test "${GML_DATABASE_TESTS:-}" = 1
 
 scenario_count=0
-expected_scenarios=90
+expected_scenarios=92
 run_scenario() {
     local output
     if ! output="$("$@" 2>&1)"; then
@@ -102,6 +102,7 @@ for home in http://gml-regression.test http://gml-regression.test/ygnaglul; do
     run_scenario php "$ROOT/resource-approval.php"
     run_scenario php "$ROOT/resource-approval-hardening.php"
     run_scenario php "$ROOT/resource-approval-invalidation.php"
+    run_scenario php "$ROOT/public-eligibility.php"
     for concurrent_case in approve_approve approve_reject reject_reject; do
         case "$concurrent_case" in
             approve_approve) decision_one=approve; decision_two=approve ;;

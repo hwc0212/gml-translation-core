@@ -28,6 +28,27 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.0 Derived Publication Eligibility
+
+Phase 2D adds one product-neutral, derived publication decision for every exact
+resource/language snapshot. A local translated route is public eligible only
+when the source resource is indexable, the route round-trips safely, machine
+readiness is complete, Human Review approved the current snapshot, and that
+approval still matches the current manifest and Translation Memory generation.
+The result is calculated from authoritative state and is never stored as a
+second `published` flag.
+
+Bulk APIs load Human Review state in one joined query per 500 resources. The
+manifest table now has an additive index on its existing `source_url_hash`, so
+sitemap adapters can resolve source and translated URLs back to resources in
+bounded reads without URL-by-language database loops. External-domain targets
+remain `external_unverified` and fail closed until a future authenticated
+cross-site readiness protocol exists.
+
+Core only supplies the eligibility decision and URL cluster. Product adapters
+remain responsible for SEO-plugin indexability integration and for applying the
+decision consistently to routing, previews, switchers, hreflang, and sitemaps.
+
 ## Vendoring
 
 Product repositories contain `translation-core.lock.json` plus a vendoring
@@ -79,10 +100,9 @@ Machine and Human states remain separate:
 | any | approved/rejected | no | stale |
 | external_unverified | none | n/a | blocked and not locally reviewable |
 
-There is still no persisted `public_eligible` flag. Human Review remains a
-shadow-only workflow and has no consumer in anonymous routing, redirects,
-rendering, switchers, canonical, robots, hreflang, sitemaps, translated-page
-visibility, or public cache eligibility.
+There is still no persisted `public_eligible` flag. In 0.9.0 the exact current
+Human Review decision is one input to the derived publication eligibility API;
+product adapters decide how that API affects anonymous routes and SEO output.
 
 ## 0.8.0 Human Review and Snapshot Approval
 

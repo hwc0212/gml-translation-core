@@ -26,45 +26,24 @@ class GML_Translation_Provider implements GML_Translation_Provider_Interface, GM
     }
 
     public function get_alternate_urls( $url ) {
-        $languages = $this->get_languages();
-        $source    = $this->get_source_language();
-        if ( ! $source || count( $languages ) < 2 ) {
-            return [];
-        }
+        if ( ! $this->is_local_url( $url ) || ! class_exists( 'GML_Public_Eligibility' ) ) return [];
+        $resource = $this->resolve_resource( $url );
+        if ( ! $resource instanceof GML_Resource_Identity ) return [];
 
+        $cluster = GML_Public_Eligibility::get_cluster( $resource, [ 'entrypoint' => 'hreflang' ] );
         $current = $this->get_current_language();
-        if ( $current !== $source && ! $this->is_index_ready( $current ) ) {
-            return [];
-        }
-
-        if ( ! $this->is_local_url( $url ) ) {
-            return [];
-        }
-
-        $source_url = $this->get_translated_url( $url, $source );
-        if ( ! $source_url ) {
-            return [];
-        }
+        if ( empty( $cluster['languages'][ $current ]['public_eligible'] ) ) return [];
+        $source = $this->get_source_language();
+        $source_url = $cluster['eligible_urls'][ $source ] ?? '';
+        if ( $source_url === '' ) return [];
 
         $alternates = [
             $this->get_hreflang_code( $source ) => $source_url,
-            'x-default'                         => $source_url,
+            'x-default' => $source_url,
         ];
-
-        foreach ( $languages as $lang ) {
-            if ( $lang === $source || ! $this->is_index_ready( $lang ) ) {
-                continue;
-            }
-            $translated_url = class_exists( 'GML_Language_Utils' )
-                && GML_Language_Utils::is_external_language( $lang )
-                && class_exists( 'GML_URL_Helper' )
-                ? GML_URL_Helper::get_external_hreflang_url( $source_url, $lang )
-                : $this->get_translated_url( $source_url, $lang );
-            if ( $translated_url ) {
-                $alternates[ $this->get_hreflang_code( $lang ) ] = $translated_url;
-            }
+        foreach ( $cluster['eligible_urls'] as $lang => $translated_url ) {
+            if ( $lang !== $source ) $alternates[ $this->get_hreflang_code( $lang ) ] = $translated_url;
         }
-
         return $alternates;
     }
 
@@ -156,6 +135,24 @@ class GML_Translation_Provider implements GML_Translation_Provider_Interface, GM
             }
         }
         return $result;
+    }
+
+    public function get_public_status( $subject, $lang, array $context = [] ) {
+        return class_exists( 'GML_Public_Eligibility' )
+            ? GML_Public_Eligibility::get_status( $subject, $lang, $context )
+            : [];
+    }
+
+    public function get_public_cluster( $subject, array $context = [] ) {
+        return class_exists( 'GML_Public_Eligibility' )
+            ? GML_Public_Eligibility::get_cluster( $subject, $context )
+            : [];
+    }
+
+    public function get_public_clusters_bulk( array $subjects, array $context = [] ) {
+        return class_exists( 'GML_Public_Eligibility' )
+            ? GML_Public_Eligibility::get_clusters_bulk( $subjects, $context )
+            : [];
     }
 
     public function get_source_language() {

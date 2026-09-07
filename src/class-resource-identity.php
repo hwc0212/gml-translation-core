@@ -154,19 +154,56 @@ final class GML_Resource_Identity {
         }
         if ( is_string( $subject ) && preg_match( '/^post:([a-z0-9_-]+):(\d+)$/', $subject, $m ) ) return self::for_post( (int) $m[2] );
         if ( is_string( $subject ) && preg_match( '/^term:([a-z0-9_-]+):(\d+)$/', $subject, $m ) ) return self::for_term( (int) $m[2], $m[1] );
+        if ( is_string( $subject ) && preg_match( '/^role:front_page:\d+$/', $subject ) ) return self::front_page();
+        if ( is_string( $subject ) && preg_match( '/^role:posts_page:\d+$/', $subject ) ) return self::posts_page();
         if ( is_string( $subject ) && preg_match( '/^archive:([a-z0-9_-]+)$/', $subject, $m ) ) return self::for_archive( $m[1] );
         if ( is_string( $subject ) && preg_match( '#^https?://#i', $subject ) ) {
             $post_id = url_to_postid( $subject );
-            return $post_id ? self::for_post( $post_id ) : null;
+            if ( $post_id ) return self::for_post( $post_id );
+            $resolved = self::resolve_urls( [ $subject ] );
+            return $resolved[ (string) $subject ] ?? null;
         }
         return $subject === null ? self::current() : null;
     }
 
     public static function current() {
+        return self::current_request( false );
+    }
+
+    /** Resolve the public queried object even for a signed-in Review preview. */
+    public static function current_public() {
+        return self::current_request( true );
+    }
+
+    /** Resolve URLs through the indexed manifest URL hash, including terms and archives. */
+    public static function resolve_urls( array $urls ) {
+        $hashes = [];
+        $normalized = [];
+        foreach ( array_slice( $urls, 0, 5000 ) as $url ) {
+            $original = (string) $url;
+            $canonical = self::canonical_source_url( $original );
+            if ( $canonical === '' ) continue;
+            $hash = hash( 'sha256', $canonical );
+            $hashes[ $hash ] = true;
+            $normalized[ $original ] = $hash;
+        }
+        if ( ! $hashes || ! class_exists( 'GML_Resource_Manifest_Store' ) ) return [];
+        $keys = GML_Resource_Manifest_Store::get_resource_keys_by_url_hashes( array_keys( $hashes ) );
+        $result = [];
+        foreach ( $normalized as $original => $hash ) {
+            if ( empty( $keys[ $hash ] ) ) continue;
+            $resource = self::resolve( $keys[ $hash ] );
+            if ( ! $resource instanceof self || ! hash_equals( $hash, $resource->get_source_url_hash() ) ) continue;
+            $result[ $original ] = $resource;
+        }
+        return $result;
+    }
+
+    private static function current_request( $allow_personalized ) {
         if ( ( defined( 'REST_REQUEST' ) && REST_REQUEST ) || wp_doing_ajax() ) return self::excluded( 'rest_ajax' );
         if ( function_exists( 'is_feed' ) && is_feed() ) return self::excluded( 'feed' );
         if ( is_search() || is_404() || is_author() || is_date() ) return self::excluded( 'non_indexable_archive' );
-        if ( is_user_logged_in() ) return self::excluded( 'personalized' );
+        if ( ! $allow_personalized && is_user_logged_in() ) return self::excluded( 'personalized' );
         foreach ( [ 'is_cart' => 'cart', 'is_checkout' => 'checkout', 'is_account_page' => 'account' ] as $function => $reason ) {
             if ( function_exists( $function ) && call_user_func( $function ) ) return self::excluded( $reason );
         }
@@ -190,7 +227,7 @@ final class GML_Resource_Identity {
         return $resource;
     }
 
-    private static function canonical_source_url( $url ) {
+    public static function canonical_source_url( $url ) {
         $url = esc_url_raw( (string) $url, [ 'http', 'https' ] );
         if ( $url === '' ) return '';
         if ( class_exists( 'GML_URL_Helper' ) && GML_URL_Helper::internal_absolute_path( $url ) === null ) return '';
@@ -204,6 +241,11 @@ final class GML_Resource_Identity {
         $path = '/' . ltrim( (string) ( $parts['path'] ?? '/' ), '/' );
         $path = function_exists( 'user_trailingslashit' ) ? user_trailingslashit( $path ) : trailingslashit( $path );
         return strtolower( $parts['scheme'] ) . '://' . strtolower( $parts['host'] ) . $port . $path;
+    }
+
+    public static function source_url_hash( $url ) {
+        $url = self::canonical_source_url( $url );
+        return $url === '' ? '' : hash( 'sha256', $url );
     }
 
     private static function site_revision( $variant ) {

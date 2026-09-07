@@ -174,6 +174,37 @@ final class GML_Resource_Manifest_Store {
         return $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::manifest_table() . ' WHERE resource_key=%s LIMIT 1', (string) $key ) );
     }
 
+    /** Resolve canonical source URL hashes in bounded indexed reads. */
+    public static function get_resource_keys_by_url_hashes( array $hashes ) {
+        global $wpdb;
+        $valid = [];
+        foreach ( array_slice( $hashes, 0, 5000 ) as $hash ) {
+            $hash = strtolower( sanitize_text_field( (string) $hash ) );
+            if ( preg_match( '/^[a-f0-9]{64}$/', $hash ) ) $valid[ $hash ] = true;
+        }
+        $valid = array_keys( $valid );
+        if ( ! $valid || ! self::tables_ready() ) return [];
+
+        $result = [];
+        $allowed = array_fill_keys( $valid, true );
+        $table = self::manifest_table();
+        foreach ( array_chunk( $valid, 500 ) as $chunk ) {
+            $placeholders = implode( ',', array_fill( 0, count( $chunk ), '%s' ) );
+            $rows = $wpdb->get_results( $wpdb->prepare(
+                "SELECT source_url_hash,resource_key FROM $table WHERE source_url_hash IN ($placeholders)",
+                $chunk
+            ) );
+            if ( $wpdb->last_error !== '' ) return [];
+            foreach ( (array) $rows as $row ) {
+                $hash = strtolower( (string) $row->source_url_hash );
+                if ( isset( $allowed[ $hash ] ) ) {
+                    $result[ $hash ] = (string) $row->resource_key;
+                }
+            }
+        }
+        return $result;
+    }
+
     private static function clear_language_readiness() {
         if ( class_exists( 'GML_Translation_Readiness' ) ) GML_Translation_Readiness::clear_cache();
     }

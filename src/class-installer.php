@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '3.2.0';
+    const DB_VERSION = '3.3.0';
     const ERROR_OPTION = 'gml_translation_db_error';
 
     public static function register_hooks() {
@@ -58,6 +58,7 @@ class GML_Installer {
             self::create_tables();
             self::ensure_phase2c1_columns();
             self::ensure_resource_readiness_index();
+            self::ensure_resource_manifest_url_index();
             self::set_default_options();
             self::disable_large_option_autoload();
             self::create_cache_directory();
@@ -157,6 +158,7 @@ class GML_Installer {
             PRIMARY KEY (id),
             UNIQUE KEY resource_key (resource_key),
             KEY object_lookup (resource_type, object_id),
+            KEY source_url_hash (source_url_hash),
             KEY discovery_state (discovery_state),
             KEY global_generation (global_generation)
         ) ENGINE=InnoDB $cc;" );
@@ -315,6 +317,18 @@ class GML_Installer {
         $index = $wpdb->get_var( "SHOW INDEX FROM $table WHERE Key_name='status_id'", 2 );
         if ( $wpdb->last_error !== '' ) throw new RuntimeException( 'readiness_index_check_failed' );
         if ( $index === null ) self::execute( "ALTER TABLE $table ADD KEY status_id (status, id)" );
+    }
+
+    /** Add the lookup used to map sitemap URLs back to resource manifests. */
+    private static function ensure_resource_manifest_url_index() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'gml_resource_manifests';
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+        if ( $wpdb->last_error !== '' ) throw new RuntimeException( 'manifest_table_check_failed' );
+        if ( $exists !== $table ) return;
+        $index = $wpdb->get_var( "SHOW INDEX FROM $table WHERE Key_name='source_url_hash'", 2 );
+        if ( $wpdb->last_error !== '' ) throw new RuntimeException( 'manifest_url_index_check_failed' );
+        if ( $index === null ) self::execute( "ALTER TABLE $table ADD KEY source_url_hash (source_url_hash)" );
     }
 
     // ── Default options ───────────────────────────────────────────────────────

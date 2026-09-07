@@ -3,8 +3,9 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 final class GML_Resource_Approval {
-    const SCHEMA_VERSION = '3.2.0';
+    const SCHEMA_VERSION = '3.3.0';
     const MAX_PAGE_SIZE = 100;
+    const READ_CHUNK = 500;
     const MAX_REVIEW_NOTE = 4000;
 
     public static function review_table() { global $wpdb; return $wpdb->prefix . 'gml_resource_reviews'; }
@@ -54,6 +55,60 @@ final class GML_Resource_Approval {
         ) );
         if ( ! $row ) return self::empty_status( $key, $lang, 'missing_manifest' );
         return self::decorate_row( $row, $lang );
+    }
+
+    /** One joined query per 500 resource keys for derived publication reads. */
+    public static function get_statuses_bulk( array $subjects, array $languages = [] ) {
+        global $wpdb;
+        $keys = [];
+        foreach ( array_slice( $subjects, 0, 5000 ) as $subject ) {
+            $key = self::resource_key( $subject );
+            if ( $key !== '' ) $keys[ $key ] = true;
+        }
+        $keys = array_keys( $keys );
+        $languages = $languages ? self::normalize_languages( $languages ) : self::reviewable_languages();
+        $result = [];
+        foreach ( $keys as $key ) {
+            foreach ( $languages as $lang ) $result[ $key ][ $lang ] = self::empty_status( $key, $lang, 'missing_manifest' );
+        }
+        if ( ! $keys || ! $languages || ! self::tables_ready() ) return $result;
+
+        $manifests = GML_Resource_Manifest_Store::manifest_table();
+        $readiness = GML_Resource_Manifest_Store::readiness_table();
+        $versions = self::version_table();
+        $reviews = self::review_table();
+        $language_placeholders = implode( ',', array_fill( 0, count( $languages ), '%s' ) );
+        foreach ( array_chunk( $keys, self::READ_CHUNK ) as $chunk ) {
+            $key_placeholders = implode( ',', array_fill( 0, count( $chunk ), '%s' ) );
+            $args = array_merge( $languages, $chunk );
+            $rows = $wpdb->get_results( $wpdb->prepare(
+                "SELECT m.id AS resource_id,m.resource_key,m.resource_type,m.object_id,m.taxonomy,m.variant,
+                        m.manifest_generation,m.manifest_fingerprint,m.global_generation AS manifest_global_generation,
+                        m.required_count,m.critical_count,m.discovery_state,m.updated_at AS manifest_updated_at,
+                        r.target_lang,r.manifest_generation AS readiness_manifest_generation,
+                        r.global_generation AS readiness_global_generation,r.required_count AS readiness_required_count,
+                        r.translated_count,r.critical_missing_count,r.translation_fingerprint,r.status,r.calculated_at,
+                        COALESCE(v.generation,1) AS translation_generation,
+                        rv.decision,rv.manifest_generation AS review_manifest_generation,
+                        rv.manifest_fingerprint AS review_manifest_fingerprint,
+                        rv.global_generation AS review_global_generation,
+                        rv.translation_generation AS review_translation_generation,
+                        rv.translation_fingerprint AS review_translation_fingerprint,
+                        rv.review_revision,rv.reviewer_user_id,rv.review_note,rv.reviewed_at
+                 FROM $manifests m
+                 INNER JOIN $readiness r ON r.resource_id=m.id AND r.target_lang IN ($language_placeholders)
+                 LEFT JOIN $versions v ON v.resource_id=m.id AND v.target_lang=r.target_lang
+                 LEFT JOIN $reviews rv ON rv.resource_id=m.id AND rv.target_lang=r.target_lang
+                 WHERE m.resource_key IN ($key_placeholders)",
+                $args
+            ) );
+            if ( $wpdb->last_error !== '' ) return $result;
+            foreach ( (array) $rows as $row ) {
+                $lang = self::normalize_language( $row->target_lang );
+                if ( $lang !== '' ) $result[ (string) $row->resource_key ][ $lang ] = self::decorate_row( $row, $lang );
+            }
+        }
+        return $result;
     }
 
     /** Two indexed queries regardless of the number of returned rows. */
