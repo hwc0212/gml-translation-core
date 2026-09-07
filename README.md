@@ -45,6 +45,11 @@ event are rolled back and the existing decision remains authoritative. Database
 regressions cover approval, rejection, cache-write failure, and bounded product
 indexability reads.
 
+Translated HTML now combines page-local translation completeness with the same
+exact resource publication decision. A backlog on unrelated resources no
+longer strips hreflang or adds an incomplete-page directive to an approved
+page; genuinely incomplete output and unreviewed resources still fail closed.
+
 ## 0.9.0 Derived Publication Eligibility
 
 Phase 2D adds one product-neutral, derived publication decision for every exact

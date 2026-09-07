@@ -143,10 +143,9 @@ class GML_Translation_Output_Buffer {
                 $parser     = new GML_HTML_Parser();
                 $parsed     = $parser->parse( $html_clean );
                 $translated = ( new GML_Translator() )->translate( $parsed, $this->target_lang );
-                $is_index_ready = $this->translation_is_index_ready( $translated );
-                if ( class_exists( 'GML_Queue_Processor' ) ) {
-                    $is_index_ready = $is_index_ready && GML_Queue_Processor::language_is_index_ready( $this->target_lang );
-                }
+                $is_index_ready = $this->publication_is_index_ready(
+                    $this->translation_is_index_ready( $translated )
+                );
                 $result     = $parser->rebuild( $translated );
 
                 // ── Server-side link rewriting ───────────────────────────────
@@ -228,6 +227,35 @@ class GML_Translation_Output_Buffer {
             }
 
             return ( $translated_count / count( $unique ) ) >= 0.95;
+        }
+
+        /**
+         * Combine this rendered page's completeness with the active publication
+         * authority. Phase 2D publishes per resource and exact review snapshot;
+         * an unrelated language backlog must not strip hreflang from an approved
+         * page. Older hosts without the publication service retain the legacy
+         * language-wide readiness check.
+         */
+        protected function publication_is_index_ready( $page_ready, $resource = null ) {
+            if ( ! $page_ready ) {
+                return false;
+            }
+
+            if ( class_exists( 'GML_Public_Eligibility' ) && class_exists( 'GML_Resource_Identity' ) ) {
+                $resource = $resource instanceof GML_Resource_Identity
+                    ? $resource
+                    : GML_Resource_Identity::current_public();
+                return $resource instanceof GML_Resource_Identity
+                    && $resource->is_eligible()
+                    && GML_Public_Eligibility::is_eligible(
+                        $resource,
+                        $this->target_lang,
+                        [ 'entrypoint' => 'output_buffer' ]
+                    );
+            }
+
+            return ! class_exists( 'GML_Queue_Processor' )
+                || GML_Queue_Processor::language_is_index_ready( $this->target_lang );
         }
 
         /**

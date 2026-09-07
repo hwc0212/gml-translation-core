@@ -12,6 +12,7 @@ if ( $source_core ) {
         'class-page-cache.php',
         'class-resource-approval.php',
         'class-public-eligibility.php',
+        'class-output-buffer.php',
     ] as $file ) {
         require_once $source_core . '/' . $file;
     }
@@ -113,6 +114,18 @@ gml_db_assert( ! is_wp_error( $approved ), 'current translation snapshot can be 
 gml_db_assert( GML_Page_Cache::generation() > $cache_generation, 'approval rotates the translated page-cache namespace' );
 $eligible = GML_Public_Eligibility::get_status( $approved_resource, 'qa' );
 gml_db_assert( $eligible['public_eligible'] && $eligible['reason'] === 'eligible', 'exact approved current snapshot becomes public eligible' );
+
+class GML_Phase2D_Output_Buffer_Probe extends GML_Translation_Output_Buffer {
+    public function __construct() {}
+    public function exact_readiness( $page_ready, $resource, $lang ) {
+        $this->target_lang = $lang;
+        return $this->publication_is_index_ready( $page_ready, $resource );
+    }
+}
+$output_probe = new GML_Phase2D_Output_Buffer_Probe();
+gml_db_assert( $output_probe->exact_readiness( true, $approved_resource, 'qa' ), 'approved resource output is not blocked by unrelated language backlog' );
+gml_db_assert( ! $output_probe->exact_readiness( false, $approved_resource, 'qa' ), 'incomplete rendered output still fails closed after resource approval' );
+gml_db_assert( ! $output_probe->exact_readiness( true, $noindex_resource, 'qa' ), 'unreviewed resource output remains protected' );
 gml_db_assert( strpos( $eligible['url'], '/qa/phase2d-approved/' ) !== false, 'eligible route contains one language prefix under root or subdirectory' );
 
 $source_status = GML_Public_Eligibility::get_status( $approved_resource, 'en' );
