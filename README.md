@@ -34,9 +34,11 @@ Approving or rejecting an exact translation snapshot now rotates the rendered
 page-cache namespace inside the same database transaction as the current review
 row and append-only audit event. The generation uses an atomic database
 increment, so concurrent review or content invalidations cannot collapse into a
-single stale namespace. Anonymous routing, canonical, hreflang, and sitemap
-output therefore cannot keep serving an older publication decision from Redis,
-Memcached, or database transients after a reviewer acts.
+single stale namespace. It also advances beyond a persistent-cache value that
+is ahead of the database, preventing namespace reuse after a database restore
+with stale Redis or Memcached data. Anonymous routing, canonical, hreflang, and
+sitemap output therefore cannot keep serving an older publication decision
+after a reviewer acts.
 
 If the cache generation cannot be updated, the review decision and its audit
 event are rolled back and the existing decision remains authoritative. Database

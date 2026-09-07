@@ -96,15 +96,30 @@ class GML_Page_Cache {
     public static function force_invalidate() {
         global $wpdb;
 
-        // Ensure the non-autoloaded option exists, then increment its database
-        // value atomically. A read-plus-update_option sequence can lose one of
-        // two concurrent invalidations and leave a response cached between the
-        // corresponding commits under the newer namespace.
-        self::generation();
-        $updated = $wpdb->query( $wpdb->prepare(
-            "UPDATE {$wpdb->options} SET option_value=CAST(option_value AS UNSIGNED)+1 WHERE option_name=%s",
-            self::GENERATION_OPTION
-        ) );
+        // Reconcile a persistent-cache value that may be ahead of the database,
+        // then increment atomically. This prevents both concurrent lost updates
+        // and namespace reuse after a database restore with stale Redis data.
+        $observed = max( 0, (int) get_option( self::GENERATION_OPTION, 0 ) );
+        if ( $observed < 1 ) {
+            $observed = wp_rand( 1000000, 2147480000 );
+        }
+        $update = static function() use ( $wpdb, $observed ) {
+            return $wpdb->query( $wpdb->prepare(
+                "UPDATE {$wpdb->options} SET option_value=GREATEST(CAST(option_value AS UNSIGNED),%d)+1 WHERE option_name=%s",
+                $observed,
+                self::GENERATION_OPTION
+            ) );
+        };
+        $updated = $update();
+        if ( $updated === 0 ) {
+            $inserted = $wpdb->query( $wpdb->prepare(
+                "INSERT IGNORE INTO {$wpdb->options} (option_name,option_value,autoload) VALUES (%s,%s,'no')",
+                self::GENERATION_OPTION,
+                (string) $observed
+            ) );
+            if ( $inserted === false ) return false;
+            $updated = $update();
+        }
         if ( $updated !== 1 ) {
             return false;
         }

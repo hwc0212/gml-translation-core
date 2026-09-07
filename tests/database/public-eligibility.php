@@ -100,7 +100,14 @@ gml_phase2d_complete( $noindex_resource, 'noindex' );
 $unreviewed = GML_Public_Eligibility::get_status( $approved_resource, 'qa' );
 gml_db_assert( ! $unreviewed['public_eligible'] && $unreviewed['reason'] === 'unreviewed', 'machine-complete but unreviewed target fails closed' );
 
+$database_cache_generation = (int) $wpdb->get_var( $wpdb->prepare(
+    "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s",
+    GML_Page_Cache::GENERATION_OPTION
+) );
+$stale_cached_generation = max( $database_cache_generation, GML_Page_Cache::generation() ) + 1000;
+wp_cache_set( GML_Page_Cache::GENERATION_OPTION, $stale_cached_generation, 'options' );
 $cache_generation = GML_Page_Cache::generation();
+gml_db_assert( $cache_generation === $stale_cached_generation, 'fixture exposes a persistent-cache generation ahead of the database' );
 $approved = gml_phase2d_approve( $approved_resource );
 gml_db_assert( ! is_wp_error( $approved ), 'current translation snapshot can be approved' );
 gml_db_assert( GML_Page_Cache::generation() > $cache_generation, 'approval rotates the translated page-cache namespace' );
@@ -118,7 +125,7 @@ gml_db_assert( ! $external['public_eligible'] && $external['reason'] === 'extern
 $approved_snapshot = GML_Resource_Approval::get_status( $approved_resource, 'qa' );
 $audit_before_cache_failure = count( GML_Resource_Approval::get_audit( $approved_resource, 'qa' ) );
 $fail_cache_generation = static function( $sql ) use ( $wpdb ) {
-    $needle = "UPDATE {$wpdb->options} SET option_value=CAST(option_value AS UNSIGNED)+1";
+    $needle = "UPDATE {$wpdb->options} SET option_value=GREATEST(CAST(option_value AS UNSIGNED)";
     if ( strpos( $sql, $needle ) === 0 && strpos( $sql, GML_Page_Cache::GENERATION_OPTION ) !== false ) {
         return "UPDATE {$wpdb->prefix}gml_missing_cache_generation SET option_value=1";
     }
