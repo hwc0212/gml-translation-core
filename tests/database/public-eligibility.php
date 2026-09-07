@@ -121,11 +121,27 @@ class GML_Phase2D_Output_Buffer_Probe extends GML_Translation_Output_Buffer {
         $this->target_lang = $lang;
         return $this->publication_is_index_ready( $page_ready, $resource );
     }
+    public function rendered_readiness( array $translated, $lang ) {
+        $this->target_lang = $lang;
+        return $this->translation_is_index_ready( $translated );
+    }
 }
 $output_probe = new GML_Phase2D_Output_Buffer_Probe();
 gml_db_assert( $output_probe->exact_readiness( true, $approved_resource, 'qa' ), 'approved resource output is not blocked by unrelated language backlog' );
 gml_db_assert( ! $output_probe->exact_readiness( false, $approved_resource, 'qa' ), 'incomplete rendered output still fails closed after resource approval' );
 gml_db_assert( ! $output_probe->exact_readiness( true, $noindex_resource, 'qa' ), 'unreviewed resource output remains protected' );
+$upstream_render = [
+    'nodes' => [
+        [ 'text' => 'phase2d direct source', 'hash' => md5( 'phase2d direct source' ), 'context_type' => 'text' ],
+        [ 'text' => 'QA phase2d upstream title', 'hash' => md5( 'QA phase2d upstream title' ), 'context_type' => 'seo_title' ],
+    ],
+    'replacements' => [ 'phase2d direct source' => 'QA phase2d direct source' ],
+];
+gml_db_assert( ! $output_probe->rendered_readiness( $upstream_render, 'qa' ), 'unknown upstream text keeps rendered output incomplete' );
+GML_Translation_Output_Buffer::register_pretranslated_text( 'QA phase2d upstream title', 'qb' );
+gml_db_assert( ! $output_probe->rendered_readiness( $upstream_render, 'qa' ), 'upstream translation registration is isolated by target language' );
+GML_Translation_Output_Buffer::register_pretranslated_text( 'QA phase2d upstream title', 'qa' );
+gml_db_assert( $output_probe->rendered_readiness( $upstream_render, 'qa' ), 'request-local upstream translation satisfies rendered readiness without database reads' );
 gml_db_assert( strpos( $eligible['url'], '/qa/phase2d-approved/' ) !== false, 'eligible route contains one language prefix under root or subdirectory' );
 
 $source_status = GML_Public_Eligibility::get_status( $approved_resource, 'en' );

@@ -22,6 +22,9 @@ class GML_Translation_Output_Buffer {
     protected $target_lang = '';
     protected $buffer_level = 0;
 
+    /** @var array<string, array<string, true>> Request-local upstream translations by language and text hash. */
+    private static $pretranslated_texts = [];
+
     public function __construct() {
         add_action( 'template_redirect', [ $this, 'start_buffer' ], 1 );
         add_action( 'shutdown',          [ $this, 'end_buffer'   ], 999 );
@@ -58,6 +61,22 @@ class GML_Translation_Output_Buffer {
             $this->enabled = false;
             $this->buffer_level = 0;
         }
+    }
+
+    /**
+     * Register text translated before the HTML buffer, for example by a
+     * WordPress gettext adapter. This is request-local and performs no I/O.
+     */
+    public static function register_pretranslated_text( $text, $target_lang ) {
+        $text = trim( (string) $text );
+        $target_lang = sanitize_key( $target_lang );
+        if ( $text === '' || $target_lang === '' ) {
+            return;
+        }
+        if ( ! isset( self::$pretranslated_texts[ $target_lang ] ) ) {
+            self::$pretranslated_texts[ $target_lang ] = [];
+        }
+        self::$pretranslated_texts[ $target_lang ][ md5( $text ) ] = true;
     }
 
     // ── Buffer callback ───────────────────────────────────────────────────────
@@ -216,17 +235,30 @@ class GML_Translation_Output_Buffer {
 
             $translated_count = 0;
             foreach ( $unique as $text ) {
-                if ( array_key_exists( $text, $replacements ) && trim( (string) $replacements[ $text ] ) !== '' ) {
+                if ( $this->text_is_translated( $text, $replacements ) ) {
                     $translated_count++;
                 }
             }
             foreach ( $critical as $text ) {
-                if ( ! array_key_exists( $text, $replacements ) || trim( (string) $replacements[ $text ] ) === '' ) {
+                if ( ! $this->text_is_translated( $text, $replacements ) ) {
                     return false;
                 }
             }
 
             return ( $translated_count / count( $unique ) ) >= 0.95;
+        }
+
+        /** Determine whether this rendered text was translated in either pipeline. */
+        protected function text_is_translated( $text, array $replacements ) {
+            if ( array_key_exists( $text, $replacements ) && trim( (string) $replacements[ $text ] ) !== '' ) {
+                return true;
+            }
+
+            $target_lang = sanitize_key( $this->target_lang );
+            $text = trim( (string) $text );
+            return $target_lang !== ''
+                && $text !== ''
+                && ! empty( self::$pretranslated_texts[ $target_lang ][ md5( $text ) ] );
         }
 
         /**

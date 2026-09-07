@@ -49,6 +49,11 @@ Translated HTML now combines page-local translation completeness with the same
 exact resource publication decision. A backlog on unrelated resources no
 longer strips hreflang or adds an incomplete-page directive to an approved
 page; genuinely incomplete output and unreviewed resources still fail closed.
+Product adapters that translate WordPress gettext output before the HTML buffer
+can register those target strings in a request-local, in-memory set. Rendered
+readiness then counts the already translated strings without loading the full
+Translation Memory, adding database queries, or weakening the exact-snapshot
+publication gate.
 
 ## 0.9.0 Derived Publication Eligibility
 
