@@ -206,12 +206,17 @@ class GML_Translation_Content_Crawler {
 		delete_option( 'gml_crawl_offset' );
 		delete_option( 'gml_crawl_completed' );
 		update_option( 'gml_crawl_total', $total, false );
-		update_option( 'gml_crawl_running', true, false );
+		if ( ! static::update_runtime_option( 'gml_crawl_running', true ) ) {
+			if ( $new_crawl_time !== null ) {
+				static::unschedule_crawl();
+			}
+			return new WP_Error( 'gml_crawl_state_write_failed', 'WordPress could not persist the content crawl state. The translation queue remains unchanged.' );
+		}
 		return true;
 	}
 
 	public static function stop_crawl( $completed = false ) {
-		update_option( 'gml_crawl_running', false, false );
+		static::update_runtime_option( 'gml_crawl_running', false );
 		update_option( 'gml_crawl_completed', $completed, false );
 		static::unschedule_crawl();
 	}
@@ -500,6 +505,54 @@ class GML_Translation_Content_Crawler {
 			return GML_Language_Utils::normalize_code( $language );
 		}
 		return sanitize_key( str_replace( '_', '-', strtolower( (string) $language ) ) );
+	}
+
+	/**
+	 * Persist a high-churn runtime option outside alloptions and repair stale caches.
+	 *
+	 * WordPress can leave the previous value in a persistent alloptions cache when
+	 * an existing option changes from autoloaded to non-autoloaded. The stale value
+	 * then masks the authoritative database row in later PHP processes.
+	 */
+	protected static function update_runtime_option( $option, $value ) {
+		global $wpdb;
+
+		$serialized = maybe_serialize( $value );
+		$autoload   = function_exists( 'wp_determine_option_autoload_value' )
+			? wp_determine_option_autoload_value( $option, $value, $serialized, false )
+			: 'no';
+
+		update_option( $option, $value, false );
+		$result = $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$wpdb->options} SET option_value = %s, autoload = %s WHERE option_name = %s",
+				$serialized,
+				$autoload,
+				$option
+			)
+		);
+		if ( $result === false ) {
+			return false;
+		}
+		if ( $result === 0 && ! $wpdb->get_var( $wpdb->prepare( "SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $option ) ) ) {
+			if ( ! add_option( $option, $value, '', false ) ) {
+				return false;
+			}
+		}
+
+		$alloptions = wp_cache_get( 'alloptions', 'options' );
+		if ( is_array( $alloptions ) && array_key_exists( $option, $alloptions ) ) {
+			unset( $alloptions[ $option ] );
+			wp_cache_set( 'alloptions', $alloptions, 'options' );
+		}
+		$notoptions = wp_cache_get( 'notoptions', 'options' );
+		if ( is_array( $notoptions ) && isset( $notoptions[ $option ] ) ) {
+			unset( $notoptions[ $option ] );
+			wp_cache_set( 'notoptions', $notoptions, 'options' );
+		}
+		wp_cache_set( $option, $value, 'options' );
+
+		return true;
 	}
 
 	protected static function acquire_lock() {

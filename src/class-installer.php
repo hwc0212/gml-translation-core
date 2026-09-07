@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '3.1.0';
+    const DB_VERSION = '3.2.0';
     const ERROR_OPTION = 'gml_translation_db_error';
 
     public static function register_hooks() {
@@ -56,6 +56,7 @@ class GML_Installer {
             $old_timeout = (int) $wpdb->get_var( 'SELECT @@SESSION.lock_wait_timeout' );
             self::execute( 'SET SESSION lock_wait_timeout = 2' );
             self::create_tables();
+            self::ensure_phase2c1_columns();
             self::ensure_resource_readiness_index();
             self::set_default_options();
             self::disable_large_option_autoload();
@@ -65,6 +66,7 @@ class GML_Installer {
             if ( get_option( 'gml_db_version' ) !== self::DB_VERSION ) {
                 throw new RuntimeException( 'version_write_failed' );
             }
+            if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::schedule_rebuild();
             delete_option( self::ERROR_OPTION );
             return true;
         } catch ( Throwable $error ) {
@@ -129,7 +131,7 @@ class GML_Installer {
             UNIQUE KEY hash_lang (source_hash, source_lang, target_lang),
             KEY idx_status (status),
             KEY idx_context (context_type)
-        ) $cc;" );
+        ) ENGINE=InnoDB $cc;" );
 
         // Resource snapshots are additive. Translation Memory remains global;
         // these tables only map its source hashes to exact page resources.
@@ -157,7 +159,7 @@ class GML_Installer {
             KEY object_lookup (resource_type, object_id),
             KEY discovery_state (discovery_state),
             KEY global_generation (global_generation)
-        ) $cc;" );
+        ) ENGINE=InnoDB $cc;" );
 
         $t = $wpdb->prefix . 'gml_resource_strings';
         self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
@@ -173,7 +175,7 @@ class GML_Installer {
             UNIQUE KEY resource_hash (resource_id, manifest_generation, source_hash),
             KEY source_hash (source_hash),
             KEY resource_generation (resource_id, manifest_generation)
-        ) $cc;" );
+        ) ENGINE=InnoDB $cc;" );
 
         $t = $wpdb->prefix . 'gml_resource_readiness';
         self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
@@ -185,6 +187,7 @@ class GML_Installer {
             required_count INT UNSIGNED NOT NULL DEFAULT 0,
             translated_count INT UNSIGNED NOT NULL DEFAULT 0,
             critical_missing_count INT UNSIGNED NOT NULL DEFAULT 0,
+            translation_fingerprint CHAR(64) NOT NULL DEFAULT '',
             status VARCHAR(24) NOT NULL DEFAULT 'unknown',
             calculated_at DATETIME NOT NULL,
             PRIMARY KEY (id),
@@ -192,7 +195,7 @@ class GML_Installer {
             KEY language_status (target_lang, status),
             KEY status_id (status, id),
             KEY resource_generation (resource_id, manifest_generation, global_generation)
-        ) $cc;" );
+        ) ENGINE=InnoDB $cc;" );
 
         // Human review is deliberately separate from machine readiness. The
         // current row is cheap to read; the append-only audit table preserves
@@ -207,7 +210,7 @@ class GML_Installer {
             PRIMARY KEY (id),
             UNIQUE KEY resource_language (resource_id, target_lang),
             KEY language_generation (target_lang, generation)
-        ) $cc;" );
+        ) ENGINE=InnoDB $cc;" );
 
         $t = $wpdb->prefix . 'gml_resource_reviews';
         self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
@@ -219,6 +222,8 @@ class GML_Installer {
             manifest_fingerprint CHAR(64) NOT NULL,
             global_generation BIGINT UNSIGNED NOT NULL,
             translation_generation BIGINT UNSIGNED NOT NULL,
+            translation_fingerprint CHAR(64) NOT NULL DEFAULT '',
+            review_revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
             reviewer_user_id BIGINT UNSIGNED NOT NULL,
             review_note TEXT NOT NULL,
             reviewed_at DATETIME NOT NULL,
@@ -227,7 +232,7 @@ class GML_Installer {
             UNIQUE KEY resource_language (resource_id, target_lang),
             KEY decision_language (decision, target_lang),
             KEY reviewer_user (reviewer_user_id)
-        ) $cc;" );
+        ) ENGINE=InnoDB $cc;" );
 
         $t = $wpdb->prefix . 'gml_resource_review_audit';
         self::create_if_missing( $t, "CREATE TABLE IF NOT EXISTS $t (
@@ -240,6 +245,8 @@ class GML_Installer {
             manifest_fingerprint CHAR(64) NOT NULL,
             global_generation BIGINT UNSIGNED NOT NULL,
             translation_generation BIGINT UNSIGNED NOT NULL,
+            translation_fingerprint CHAR(64) NOT NULL DEFAULT '',
+            review_revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
             machine_status VARCHAR(24) NOT NULL,
             actor_user_id BIGINT UNSIGNED NOT NULL,
             review_note TEXT NOT NULL,
@@ -248,7 +255,7 @@ class GML_Installer {
             KEY resource_language_id (resource_id, target_lang, id),
             KEY resource_key_id (resource_key, id),
             KEY actor_created (actor_user_id, created_at)
-        ) $cc;" );
+        ) ENGINE=InnoDB $cc;" );
 
         // Async translation queue
         $t = $wpdb->prefix . 'gml_queue';
@@ -269,8 +276,33 @@ class GML_Installer {
             UNIQUE KEY queue_hash_lang (source_hash, source_lang, target_lang),
             KEY idx_status_priority (status, priority),
             KEY idx_hash (source_hash)
-        ) $cc;" );
+        ) ENGINE=InnoDB $cc;" );
 
+    }
+
+    /** Additive Phase 2C.1 columns; existing engines are inspected, never converted. */
+    private static function ensure_phase2c1_columns() {
+        global $wpdb;
+        $readiness = $wpdb->prefix . 'gml_resource_readiness';
+        $reviews = $wpdb->prefix . 'gml_resource_reviews';
+        $audit = $wpdb->prefix . 'gml_resource_review_audit';
+        $fingerprint_added = self::ensure_column( $readiness, 'translation_fingerprint', "CHAR(64) NOT NULL DEFAULT '' AFTER critical_missing_count" );
+        self::ensure_column( $reviews, 'translation_fingerprint', "CHAR(64) NOT NULL DEFAULT '' AFTER translation_generation" );
+        self::ensure_column( $reviews, 'review_revision', 'BIGINT UNSIGNED NOT NULL DEFAULT 1 AFTER translation_fingerprint' );
+        self::ensure_column( $audit, 'translation_fingerprint', "CHAR(64) NOT NULL DEFAULT '' AFTER translation_generation" );
+        self::ensure_column( $audit, 'review_revision', 'BIGINT UNSIGNED NOT NULL DEFAULT 1 AFTER translation_fingerprint' );
+        if ( $fingerprint_added ) {
+            self::execute( "UPDATE $readiness SET status='stale',translation_fingerprint=''" );
+        }
+    }
+
+    private static function ensure_column( $table, $column, $definition ) {
+        global $wpdb;
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW COLUMNS FROM $table LIKE %s", $column ) );
+        if ( $wpdb->last_error !== '' ) throw new RuntimeException( 'column_check_failed' );
+        if ( $exists !== null ) return false;
+        self::execute( "ALTER TABLE $table ADD COLUMN $column $definition" );
+        return true;
     }
 
     /** Add only the worker index introduced after the Phase 2B tables. */

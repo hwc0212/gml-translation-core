@@ -1,7 +1,10 @@
 <?php
 if ( getenv( 'GML_DATABASE_TESTS' ) !== '1' ) exit( 2 );
+if ( ! defined( 'SAVEQUERIES' ) ) define( 'SAVEQUERIES', true );
 require getenv( 'GML_TEST_WP_ROOT' ) . '/wp-load.php';
 if ( strpos( DB_NAME, 'gml_regression' ) !== 0 || $wpdb->prefix !== 'test_' ) exit( 2 );
+if ( ! is_blog_installed() ) throw new RuntimeException( 'WordPress test schema is not installed.' );
+echo "MARKER wordpress_bootstrap_loaded\n";
 require_once ABSPATH . 'wp-admin/includes/plugin.php';
 $slug = basename( realpath( getenv( 'GML_TEST_PRODUCT_DIR' ) ) );
 if ( ! in_array( $slug, [ 'gml-seo', 'gml-translate' ], true ) ) exit( 2 );
@@ -17,6 +20,7 @@ if ( $mode === 'activate' ) {
     // WordPress treats printed activation output as an error.
     $result = activate_plugin( $file );
     gml_lifecycle_assert( ! is_wp_error( $result ) && is_plugin_active( $file ), 'real WordPress plugin activation completes without output or fatal error' );
+    echo "MARKER product_activated\n";
     update_option( 'gml_db_version', '2.4.0' );
 } elseif ( $mode === 'frontend' ) {
     gml_lifecycle_assert( is_plugin_active( $file ) && class_exists( 'GML_Installer' ), 'plugin loaded through WordPress active_plugins lifecycle' );
@@ -26,4 +30,3 @@ if ( $mode === 'activate' ) {
     deactivate_plugins( $file );
     gml_lifecycle_assert( ! is_plugin_active( $file ), 'plugin deactivates without deleting translations' );
 }
-

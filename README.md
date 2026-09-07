@@ -35,6 +35,55 @@ tool. The lock records this package version, source commit, and SHA-256 hash for
 every shipped Core file. CI verifies both the committed vendor directory and,
 when checked out, this exact source commit.
 
+## 0.8.1 Snapshot-Safe Review Hardening
+
+The Review form now carries a bounded expected tuple containing the manifest
+fingerprint/generation, global generation, translation generation, deterministic
+translation snapshot fingerprint, machine state, and Human Review revision.
+These values are concurrency expectations only. The decision transaction locks
+and reconstructs the authoritative current database tuple and rejects every
+mismatch with a dedicated conflict; it never approves whichever snapshot happens
+to be current when an old form is submitted.
+
+Concurrent decisions use first-committer-wins with an explicit stale-form
+conflict. Approve/Approve, Approve/Reject, and Reject/Reject never use silent
+last-writer-wins: one transaction records one current row and one append-only
+audit event, while the other reviewer must refresh.
+
+All supported Translation Memory create/update/delete paths use the Core-owned
+mutation service. It invalidates durable resource readiness, advances each
+affected reviewed resource/language generation once, and commits the translation
+write in the same transaction. The deterministic translation fingerprint hashes
+only the ordered hashes in the exact current manifest, target language, effective
+translation status, and a SHA-256 digest of each effective translated value. It
+therefore catches legacy/downgraded writers after readiness re-entry without
+placing complete source or translation bodies in Human Review or its audit log.
+Batch readiness rebuilds calculate up to 500 fingerprints per query so this
+additional integrity check does not reintroduce per-resource reads.
+
+Human Review transactions fail closed unless every participating table exists
+and uses InnoDB. Transaction start, current-decision write, audit insert, and
+commit results are all checked. Existing non-transactional tables are reported
+as an actionable health error and are never converted automatically.
+
+Machine and Human states remain separate:
+
+| Machine snapshot | Stored decision | Snapshot match | Effective Human Review |
+| --- | --- | --- | --- |
+| complete | none | n/a | unreviewed |
+| complete | approved | yes | approved |
+| complete | rejected | yes | rejected |
+| complete | approved/rejected | no | stale |
+| incomplete/stale/render_error/excluded | none | n/a | blocked |
+| incomplete/stale/render_error/excluded | approved/rejected | yes | blocked |
+| any | approved/rejected | no | stale |
+| external_unverified | none | n/a | blocked and not locally reviewable |
+
+There is still no persisted `public_eligible` flag. Human Review remains a
+shadow-only workflow and has no consumer in anonymous routing, redirects,
+rendering, switchers, canonical, robots, hreflang, sitemaps, translated-page
+visibility, or public cache eligibility.
+
 ## 0.8.0 Human Review and Snapshot Approval
 
 Phase 2C adds a product-neutral human-review layer above machine readiness.

@@ -8,6 +8,7 @@
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
+require_once __DIR__ . '/class-page-cache.php';
 
 final class GML_Translation_Uninstaller {
 
@@ -66,6 +67,7 @@ final class GML_Translation_Uninstaller {
             self::clear_scheduled_hook( $hook );
         }
 
+        GML_Page_Cache::force_invalidate();
         self::delete_page_cache_transients();
         self::clear_translation_object_cache();
         self::remove_cache_directory();

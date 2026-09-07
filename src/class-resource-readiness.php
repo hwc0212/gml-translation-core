@@ -117,6 +117,18 @@ final class GML_Resource_Readiness {
         $index = $wpdb->prefix . 'gml_index';
         $ids = implode( ',', $resource_ids );
         $manifest_rows = $wpdb->get_results( "SELECT * FROM $manifests WHERE id IN ($ids)" );
+        $fingerprint_snapshots = [];
+        foreach ( (array) $manifest_rows as $manifest ) {
+            foreach ( $languages as $lang ) {
+                $lang = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $lang ) : sanitize_key( $lang );
+                if ( $lang !== '' ) $fingerprint_snapshots[] = [
+                    'resource_id' => (int) $manifest->id,
+                    'manifest_generation' => (int) $manifest->manifest_generation,
+                    'target_lang' => $lang,
+                ];
+            }
+        }
+        $fingerprints = self::translation_fingerprints( $fingerprint_snapshots, $source );
         $written = 0;
         foreach ( (array) $manifest_rows as $manifest ) {
             foreach ( $languages as $lang ) {
@@ -147,12 +159,15 @@ final class GML_Resource_Readiness {
                     $required = (int) $manifest->required_count;
                     $status = $critical_missing === 0 && ( $required === 0 || $translated / $required >= self::COMPLETE_RATIO ) ? 'complete' : 'incomplete';
                 }
+                $translation_fingerprint = (string) ( $fingerprints[ (int) $manifest->id ][ (int) $manifest->manifest_generation ][ $lang ] ?? '' );
+                if ( $lang !== $source && $status === 'complete' && $translation_fingerprint === '' ) $status = 'stale';
                 $saved = $wpdb->replace( $readiness, [
                     'resource_id' => (int) $manifest->id, 'target_lang' => $lang,
                     'manifest_generation' => (int) $manifest->manifest_generation,
                     'global_generation' => (int) $manifest->global_generation,
                     'required_count' => (int) $manifest->required_count, 'translated_count' => $translated,
                     'critical_missing_count' => $critical_missing, 'status' => $status,
+                    'translation_fingerprint' => $translation_fingerprint,
                     'calculated_at' => current_time( 'mysql' ),
                 ] );
                 if ( false !== $saved ) $written++;
@@ -173,8 +188,14 @@ final class GML_Resource_Readiness {
      */
     public static function apply_translation_change( $source_hash, $target_lang, $mutation ) {
         if ( ! is_callable( $mutation ) ) return false;
+        return self::apply_translation_changes( [ [ 'source_hash' => $source_hash, 'target_lang' => $target_lang ] ], $mutation );
+    }
+
+    /** Atomically invalidate a bounded set of effective Translation Memory changes. */
+    public static function apply_translation_changes( array $changes, $mutation ) {
+        if ( ! is_callable( $mutation ) ) return false;
         self::migrate_legacy_continuation();
-        return self::invalidate_translation_hash( $source_hash, $target_lang, $mutation, true );
+        return self::invalidate_translation_changes( $changes, $mutation, true );
     }
 
     /** Convert the old single continuation into durable stale rows once. */
@@ -193,11 +214,26 @@ final class GML_Resource_Readiness {
     }
 
     private static function invalidate_translation_hash( $source_hash, $target_lang, $mutation = null, $return_mutation = false ) {
+        return self::invalidate_translation_changes(
+            [ [ 'source_hash' => $source_hash, 'target_lang' => $target_lang ] ],
+            $mutation,
+            $return_mutation
+        );
+    }
+
+    private static function invalidate_translation_changes( array $changes, $mutation = null, $return_mutation = false ) {
         global $wpdb;
-        $source_hash = strtolower( sanitize_text_field( $source_hash ) );
-        $target_lang = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $target_lang ) : sanitize_key( $target_lang );
         $mutation = is_callable( $mutation ) ? $mutation : null;
-        if ( ! preg_match( '/^[a-f0-9]{32}$/', $source_hash ) || $target_lang === '' || ! GML_Resource_Manifest_Store::tables_ready() ) {
+        $normalized = [];
+        foreach ( array_slice( $changes, 0, 100 ) as $change ) {
+            $source_hash = strtolower( sanitize_text_field( $change['source_hash'] ?? '' ) );
+            $target_lang = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $change['target_lang'] ?? '' ) : sanitize_key( $change['target_lang'] ?? '' );
+            if ( preg_match( '/^[a-f0-9]{32}$/', $source_hash ) && $target_lang !== '' ) {
+                $normalized[ $target_lang . ':' . $source_hash ] = [ 'source_hash' => $source_hash, 'target_lang' => $target_lang ];
+            }
+        }
+        $normalized = array_values( $normalized );
+        if ( ! $normalized || ! GML_Resource_Manifest_Store::tables_ready() ) {
             if ( $mutation ) return call_user_func( $mutation );
             return 0;
         }
@@ -208,16 +244,25 @@ final class GML_Resource_Readiness {
         $track_reviews = class_exists( 'GML_Resource_Approval' ) && GML_Resource_Approval::tables_ready();
         if ( false === $wpdb->query( 'START TRANSACTION' ) ) return false;
         try {
-            $affected = $wpdb->query( $wpdb->prepare(
-                "UPDATE $readiness r
-                 INNER JOIN $relations s ON s.resource_id=r.resource_id
-                 INNER JOIN $manifests m ON m.id=s.resource_id AND m.manifest_generation=s.manifest_generation
-                 SET r.status='stale',r.calculated_at=%s
-                 WHERE s.source_hash=%s AND r.target_lang=%s",
-                current_time( 'mysql' ), $source_hash, $target_lang
-            ) );
-            if ( $affected === false ) throw new RuntimeException( 'readiness_invalidation_failed' );
-            if ( $track_reviews && false === GML_Resource_Approval::bump_translation_generations( $source_hash, $target_lang ) ) {
+            $affected = 0;
+            $by_language = [];
+            foreach ( $normalized as $change ) $by_language[ $change['target_lang'] ][] = $change['source_hash'];
+            foreach ( $by_language as $target_lang => $hashes ) {
+                $hashes = array_values( array_unique( $hashes ) );
+                $placeholders = implode( ',', array_fill( 0, count( $hashes ), '%s' ) );
+                $query_args = array_merge( [ current_time( 'mysql' ), $target_lang ], $hashes );
+                $changed = $wpdb->query( $wpdb->prepare(
+                    "UPDATE $readiness r
+                     INNER JOIN $relations s ON s.resource_id=r.resource_id
+                     INNER JOIN $manifests m ON m.id=s.resource_id AND m.manifest_generation=s.manifest_generation
+                     SET r.status='stale',r.calculated_at=%s
+                     WHERE r.target_lang=%s AND s.source_hash IN ($placeholders)",
+                    $query_args
+                ) );
+                if ( $changed === false ) throw new RuntimeException( 'readiness_invalidation_failed' );
+                $affected += (int) $changed;
+            }
+            if ( $track_reviews && false === GML_Resource_Approval::bump_translation_generations_for_changes( $normalized ) ) {
                 throw new RuntimeException( 'approval_invalidation_failed' );
             }
             $mutation_result = $mutation ? call_user_func( $mutation ) : true;
@@ -321,6 +366,15 @@ final class GML_Resource_Readiness {
              GROUP BY r.id,r.resource_id,r.target_lang,m.manifest_generation,m.global_generation,m.discovery_state,m.required_count,m.critical_count",
             $source
         ) );
+        $fingerprint_snapshots = [];
+        foreach ( (array) $rows as $row ) {
+            $fingerprint_snapshots[] = [
+                'resource_id' => (int) $row->resource_id,
+                'manifest_generation' => (int) $row->manifest_generation,
+                'target_lang' => (string) $row->target_lang,
+            ];
+        }
+        $fingerprints = self::translation_fingerprints( $fingerprint_snapshots, $source );
         $result = [];
         foreach ( (array) $rows as $row ) {
             $required = (int) $row->required_count;
@@ -342,6 +396,8 @@ final class GML_Resource_Readiness {
             } else {
                 $status = $critical_missing === 0 && ( $required === 0 || $translated / $required >= self::COMPLETE_RATIO ) ? 'complete' : 'incomplete';
             }
+            $translation_fingerprint = (string) ( $fingerprints[ (int) $row->resource_id ][ (int) $row->manifest_generation ][ (string) $row->target_lang ] ?? '' );
+            if ( $row->target_lang !== $source && $status === 'complete' && $translation_fingerprint === '' ) $status = 'stale';
             $result[] = [
                 'id' => (int) $row->id,
                 'resource_id' => (int) $row->resource_id,
@@ -351,6 +407,7 @@ final class GML_Resource_Readiness {
                 'required_count' => $required,
                 'translated_count' => $translated,
                 'critical_missing_count' => $critical_missing,
+                'translation_fingerprint' => $translation_fingerprint,
                 'status' => $status,
             ];
         }
@@ -367,17 +424,18 @@ final class GML_Resource_Readiness {
             $args = [];
             $now = current_time( 'mysql' );
             foreach ( $chunk as $row ) {
-                $values[] = '(%d,%d,%s,%d,%d,%d,%d,%d,%s,%s)';
-                array_push( $args, $row['id'], $row['resource_id'], $row['target_lang'], $row['manifest_generation'], $row['global_generation'], $row['required_count'], $row['translated_count'], $row['critical_missing_count'], $row['status'], $now );
+                $values[] = '(%d,%d,%s,%d,%d,%d,%d,%d,%s,%s,%s)';
+                array_push( $args, $row['id'], $row['resource_id'], $row['target_lang'], $row['manifest_generation'], $row['global_generation'], $row['required_count'], $row['translated_count'], $row['critical_missing_count'], $row['translation_fingerprint'], $row['status'], $now );
             }
             $sql = $wpdb->prepare(
-                "INSERT INTO $readiness (id,resource_id,target_lang,manifest_generation,global_generation,required_count,translated_count,critical_missing_count,status,calculated_at) VALUES " . implode( ',', $values ) .
+                "INSERT INTO $readiness (id,resource_id,target_lang,manifest_generation,global_generation,required_count,translated_count,critical_missing_count,translation_fingerprint,status,calculated_at) VALUES " . implode( ',', $values ) .
                 " ON DUPLICATE KEY UPDATE
                     manifest_generation=IF(status='rebuilding',VALUES(manifest_generation),manifest_generation),
                     global_generation=IF(status='rebuilding',VALUES(global_generation),global_generation),
                     required_count=IF(status='rebuilding',VALUES(required_count),required_count),
                     translated_count=IF(status='rebuilding',VALUES(translated_count),translated_count),
                     critical_missing_count=IF(status='rebuilding',VALUES(critical_missing_count),critical_missing_count),
+                    translation_fingerprint=IF(status='rebuilding',VALUES(translation_fingerprint),translation_fingerprint),
                     calculated_at=IF(status='rebuilding',VALUES(calculated_at),calculated_at),
                     status=IF(status='rebuilding',VALUES(status),status)",
                 $args
@@ -415,6 +473,22 @@ final class GML_Resource_Readiness {
     private static function configured_languages() {
         if ( class_exists( 'GML_Language_Utils' ) ) return GML_Language_Utils::configured_codes( true, true );
         return array_values( array_unique( array_merge( [ sanitize_key( get_option( 'gml_source_lang', 'en' ) ) ], array_map( 'sanitize_key', (array) get_option( 'gml_languages', [] ) ) ) ) );
+    }
+
+    private static function translation_fingerprints( array $snapshots, $source ) {
+        if ( ! class_exists( 'GML_Translation_Memory' ) ) return [];
+        $result = [];
+        foreach ( array_chunk( $snapshots, 500 ) as $chunk ) {
+            $chunk_result = GML_Translation_Memory::snapshot_fingerprints( $chunk, $source );
+            foreach ( $chunk_result as $resource_id => $generations ) {
+                foreach ( $generations as $manifest_generation => $languages ) {
+                    foreach ( $languages as $language => $fingerprint ) {
+                        $result[ $resource_id ][ $manifest_generation ][ $language ] = $fingerprint;
+                    }
+                }
+            }
+        }
+        return $result;
     }
 
     private static function global_generation() {

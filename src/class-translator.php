@@ -203,42 +203,17 @@ class GML_Translation_Translator {
     }
 
     public function save_to_index( $hash, $source_text, $translated_text, $source_lang, $target_lang, $context_type = 'text', $status = 'auto' ) {
-        global $wpdb;
-        $table       = $wpdb->prefix . 'gml_index';
         $hash        = sanitize_text_field( $hash );
         $source_lang = sanitize_key( $source_lang );
         $target_lang = sanitize_key( $target_lang );
         $status      = $status === 'manual' ? 'manual' : 'auto';
-
-        $existing = $wpdb->get_row( $wpdb->prepare(
-            "SELECT status,translated_text FROM $table WHERE source_hash = %s AND source_lang = %s AND target_lang = %s",
-            $hash,
-            $source_lang,
-            $target_lang
-        ) );
-        if ( $status === 'auto' && $existing && $existing->status === 'manual' ) {
-            return true;
-        }
-        $public_text_changes = ! $existing || ! hash_equals( (string) $existing->translated_text, (string) $translated_text );
-        $write = static function () use ( $wpdb, $table, $hash, $source_text, $source_lang, $target_lang, $translated_text, $context_type, $status ) {
-            return $wpdb->replace( $table, [
-                'source_hash'     => $hash,
-                'source_text'     => (string) $source_text,
-                'source_lang'     => $source_lang,
-                'target_lang'     => $target_lang,
-                'translated_text' => (string) $translated_text,
-                'context_type'    => sanitize_key( $context_type ) ?: 'text',
-                'status'          => $status,
-                'created_at'      => current_time( 'mysql' ),
-                'updated_at'      => current_time( 'mysql' ),
-            ] );
-        };
-        $saved = $public_text_changes && class_exists( 'GML_Resource_Readiness' )
-            ? GML_Resource_Readiness::apply_translation_change( $hash, $target_lang, $write )
-            : $write();
-        if ( false === $saved ) {
-            return false;
-        }
+        $saved = GML_Translation_Memory::upsert( [
+            'source_hash' => $hash, 'source_text' => (string) $source_text,
+            'source_lang' => $source_lang, 'target_lang' => $target_lang,
+            'translated_text' => (string) $translated_text,
+            'context_type' => $context_type, 'status' => $status,
+        ], true );
+        if ( false === $saved ) return false;
 
 		$pair = self::pair_key( $source_lang, $target_lang );
         if ( isset( self::$memory_cache[ $pair ] ) ) {

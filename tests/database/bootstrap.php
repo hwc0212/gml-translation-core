@@ -1,7 +1,10 @@
 <?php
 if ( getenv( 'GML_DATABASE_TESTS' ) !== '1' ) exit( "Explicit disposable-database opt-in required.\n" );
+if ( ! defined( 'SAVEQUERIES' ) ) define( 'SAVEQUERIES', true );
 require getenv( 'GML_TEST_WP_ROOT' ) . '/wp-load.php';
 if ( strpos( DB_NAME, 'gml_regression' ) !== 0 || $wpdb->prefix !== 'test_' ) exit( "Unsafe test database.\n" );
+if ( ! is_blog_installed() ) throw new RuntimeException( 'WordPress test schema is not installed.' );
+echo "MARKER wordpress_bootstrap_loaded\n";
 
 function gml_db_assert( $condition, $label ) {
     if ( ! $condition ) throw new RuntimeException( 'FAIL: ' . $label );

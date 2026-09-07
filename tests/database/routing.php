@@ -3,6 +3,7 @@
 if ( getenv( 'GML_DATABASE_TESTS' ) !== '1' ) exit( 2 );
 $mode = $argv[1] ?? '';
 if ( $mode === 'repair' ) define( 'WP_ADMIN', true );
+if ( ! defined( 'SAVEQUERIES' ) ) define( 'SAVEQUERIES', true );
 $home = getenv( 'GML_TEST_HOME' ) ?: 'http://gml-regression.test';
 $fixture_request = $argv[2] ?? '/';
 $_SERVER['REQUEST_URI'] = rtrim( parse_url( $home, PHP_URL_PATH ) ?: '', '/' ) . $fixture_request;
@@ -16,6 +17,8 @@ $_SERVER['QUERY_STRING'] = parse_url( $fixture_request, PHP_URL_QUERY ) ?: '';
 parse_str( $_SERVER['QUERY_STRING'], $_GET );
 require getenv( 'GML_TEST_WP_ROOT' ) . '/wp-load.php';
 if ( strpos( DB_NAME, 'gml_regression' ) !== 0 || $wpdb->prefix !== 'test_' ) exit( 2 );
+if ( ! is_blog_installed() ) throw new RuntimeException( 'WordPress test schema is not installed.' );
+echo "MARKER wordpress_bootstrap_loaded\n";
 require_once ABSPATH . 'wp-admin/includes/plugin.php';
 function route_assert( $ok, $label ) {
     if ( ! $ok ) throw new RuntimeException( 'FAIL: ' . $label );
@@ -29,6 +32,9 @@ if ( ! in_array( $slug, [ 'gml-translate', 'gml-seo' ], true ) ) exit( 2 );
 $file = $slug . '/' . $slug . '.php';
 if ( $mode === 'prepare' ) {
     if ( get_option( 'active_plugins', [] ) ) exit( 'Deactivate the previous fixture first.' );
+    update_option( 'home', $home );
+    update_option( 'siteurl', $home );
+    route_assert( untrailingslashit( home_url( '/' ) ) === untrailingslashit( $home ), 'fixture uses the requested installation base URL' );
     $front = wp_insert_post( [ 'post_type' => 'page', 'post_status' => 'publish', 'post_title' => 'Routing Front', 'post_name' => 'routing-front' ] );
     $about = wp_insert_post( [ 'post_type' => 'page', 'post_status' => 'publish', 'post_title' => 'Routing About', 'post_name' => 'routing-about' ] );
     update_option( 'gml_routing_fixture_ids', [ $front, $about ] );

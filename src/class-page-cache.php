@@ -84,14 +84,29 @@ class GML_Page_Cache {
         if ( self::$invalidated ) {
             return;
         }
-        self::$invalidated = true;
+        self::force_invalidate();
+    }
 
-        $generation = max( 1, (int) get_option( self::GENERATION_OPTION, 1 ) ) + 1;
-        update_option( self::GENERATION_OPTION, $generation, false );
+    /**
+     * Rotate the cache namespace even if this request invalidated it earlier.
+     *
+     * Uninstall cleanup uses this path because persistent object-cache entries
+     * cannot be portably enumerated by transient-name prefix.
+     */
+    public static function force_invalidate() {
+        self::$invalidated = true;
+        $generation = self::generation() + 1;
+        return update_option( self::GENERATION_OPTION, $generation, false )
+            || self::generation() === $generation;
     }
 
     public static function generation() {
-        return max( 1, (int) get_option( self::GENERATION_OPTION, 1 ) );
+        $generation = (int) get_option( self::GENERATION_OPTION, 0 );
+        if ( $generation < 1 ) {
+            $generation = wp_rand( 1000000, 2147480000 );
+            update_option( self::GENERATION_OPTION, $generation, false );
+        }
+        return $generation;
     }
 
     /**

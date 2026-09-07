@@ -2,6 +2,8 @@
 if ( getenv( 'GML_DATABASE_TESTS' ) !== '1' ) exit( 2 );
 require getenv( 'GML_TEST_WP_ROOT' ) . '/wp-load.php';
 if ( strpos( DB_NAME, 'gml_regression' ) !== 0 || $wpdb->prefix !== 'test_' ) exit( 2 );
+if ( ! is_blog_installed() ) throw new RuntimeException( 'WordPress test schema is not installed.' );
+echo "MARKER wordpress_bootstrap_loaded\n";
 $product = getenv( 'GML_TEST_PRODUCT_DIR' );
 if ( basename( $product ) === 'gml-seo' ) {
     define( 'GML_TRANSLATION_HOST', 'standalone' );

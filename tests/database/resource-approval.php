@@ -55,6 +55,16 @@ function gml_phase2c_nodes( $prefix, $translated ) {
     return $nodes;
 }
 
+function gml_phase2c_approve( $resource, $note = '' ) {
+    $status = GML_Resource_Approval::get_status( $resource, 'qa' );
+    return GML_Resource_Approval::approve( $resource, 'qa', 1, $note, GML_Resource_Approval::expected_snapshot( $status ) );
+}
+
+function gml_phase2c_reject( $resource, $note ) {
+    $status = GML_Resource_Approval::get_status( $resource, 'qa' );
+    return GML_Resource_Approval::reject( $resource, 'qa', 1, $note, GML_Resource_Approval::expected_snapshot( $status ) );
+}
+
 $resource = gml_phase2c_resource( 960001 );
 $nodes = gml_phase2c_nodes( 'approved', 3 );
 gml_db_assert( true === GML_Resource_Manifest_Store::save_complete( $resource, $nodes ), 'complete review fixture manifest is saved' );
@@ -62,7 +72,7 @@ $initial = GML_Resource_Approval::get_status( $resource, 'qa' );
 gml_db_assert( $initial['machine_status'] === 'complete' && $initial['review_status'] === 'unreviewed', 'machine complete remains separate from human approval' );
 
 $http_before = (int) $GLOBALS['gml_test_http_calls'];
-$approved = GML_Resource_Approval::approve( $resource, 'qa', 1, 'Reviewed in the Phase 2C fixture.' );
+$approved = gml_phase2c_approve( $resource, 'Reviewed in the Phase 2C fixture.' );
 gml_db_assert( ! is_wp_error( $approved ) && $approved['review_status'] === 'approved', 'an explicit reviewer can approve the exact current snapshot' );
 gml_db_assert( count( GML_Resource_Approval::get_audit( $resource, 'qa' ) ) === 1, 'approval appends one immutable audit event' );
 gml_db_assert( (int) $GLOBALS['gml_test_http_calls'] === $http_before, 'human approval makes no provider or frontend HTTP request' );
@@ -78,7 +88,7 @@ $source_stale = GML_Resource_Approval::get_status( $edited_resource, 'qa' );
 gml_db_assert( $source_stale['manifest_generation'] === $generation_before + 1 && $source_stale['review_status'] === 'stale', 'source revisions stale the previous human approval' );
 gml_db_assert( count( GML_Resource_Approval::get_audit( $resource, 'qa' ) ) === 1, 'automatic invalidation does not rewrite approval history' );
 
-$reapproved = GML_Resource_Approval::approve( $edited_resource, 'qa', 1, 'Reviewed after source revision.' );
+$reapproved = gml_phase2c_approve( $edited_resource, 'Reviewed after source revision.' );
 gml_db_assert( ! is_wp_error( $reapproved ) && $reapproved['review_status'] === 'approved', 'the refreshed manifest can be explicitly approved again' );
 $translation_generation = $reapproved['translation_generation'];
 $translator = new GML_Translator();
@@ -117,16 +127,17 @@ $rebuilt = GML_Resource_Approval::get_status( $edited_resource, 'qa' );
 gml_db_assert( $rebuilt['machine_status'] === 'complete' && $rebuilt['review_status'] === 'stale', 'machine rebuild cannot silently restore an old human approval' );
 gml_db_assert( $rebuilt['translation_generation'] === $translation_generation + 1, 'reviewed resource translation generation advances exactly once' );
 
-$rejected = GML_Resource_Approval::reject( $edited_resource, 'qa', 1, 'Terminology needs correction.' );
+$rejected = gml_phase2c_reject( $edited_resource, 'Terminology needs correction.' );
 gml_db_assert( ! is_wp_error( $rejected ) && $rejected['review_status'] === 'rejected', 'a reviewer can reject the current complete snapshot with a reason' );
 gml_db_assert( count( GML_Resource_Approval::get_audit( $resource, 'qa' ) ) === 3, 're-approval and rejection append audit events without deleting history' );
-$missing_note = GML_Resource_Approval::reject( $edited_resource, 'qa', 1, '' );
+$missing_note = GML_Resource_Approval::reject( $edited_resource, 'qa', 1, '', GML_Resource_Approval::expected_snapshot( $rejected ) );
 gml_db_assert( is_wp_error( $missing_note ) && $missing_note->get_error_code() === 'gml_review_note', 'rejection requires an actionable review note' );
 
 $incomplete_resource = gml_phase2c_resource( 960002 );
 $incomplete_nodes = gml_phase2c_nodes( 'incomplete', 0 );
 GML_Resource_Manifest_Store::save_complete( $incomplete_resource, $incomplete_nodes );
-$blocked = GML_Resource_Approval::approve( $incomplete_resource, 'qa', 1, '' );
+$blocked_status = GML_Resource_Approval::get_status( $incomplete_resource, 'qa' );
+$blocked = GML_Resource_Approval::approve( $incomplete_resource, 'qa', 1, '', GML_Resource_Approval::expected_snapshot( $blocked_status ) );
 gml_db_assert( is_wp_error( $blocked ) && $blocked->get_error_code() === 'gml_review_machine', 'incomplete translations cannot be approved' );
 $external = GML_Resource_Approval::approve( $edited_resource, 'qx', 1, '' );
 gml_db_assert( is_wp_error( $external ) && $external->get_error_code() === 'gml_review_language', 'external unverified sites cannot receive a local approval' );

@@ -19,7 +19,9 @@ update_option( 'gml_languages', [ [ 'code' => 'es' ] ], false );
 update_option( 'gml_translate_uninstall_delete_data', 0, false );
 update_option( 'gml_seo_uninstall_fixture', 'keep', false );
 update_option( 'gml_indexnow_key', 'keep', false );
-set_transient( 'gml_page_uninstall_fixture', 'cached', HOUR_IN_SECONDS );
+$page_cache_generation = GML_Page_Cache::generation();
+$page_cache_key = GML_Page_Cache::key( 'es', '/es/uninstall-fixture/' );
+set_transient( $page_cache_key, 'cached', HOUR_IN_SECONDS );
 wp_schedule_single_event( time() + HOUR_IN_SECONDS, 'gml_process_queue', [ 'fixture' ] );
 
 $uploads = wp_upload_dir();
@@ -39,7 +41,9 @@ gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $reviews )
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $review_audit ) ) === $review_audit, 'default uninstall preserves review audit history' );
 gml_db_assert( get_option( 'gml_source_lang' ) === 'en', 'default uninstall preserves translation settings' );
 gml_db_assert( wp_next_scheduled( 'gml_process_queue', [ 'fixture' ] ) === false, 'default uninstall removes scheduled jobs with arguments' );
-gml_db_assert( get_transient( 'gml_page_uninstall_fixture' ) === false, 'default uninstall removes rendered page cache' );
+gml_db_assert( GML_Page_Cache::generation() > $page_cache_generation, 'default uninstall rotates the rendered-page cache namespace' );
+$new_page_cache_key = GML_Page_Cache::key( 'es', '/es/uninstall-fixture/' );
+gml_db_assert( $new_page_cache_key !== $page_cache_key && get_transient( $new_page_cache_key ) === false, 'default uninstall makes persistent rendered-page cache inaccessible' );
 gml_db_assert( ! file_exists( $cache ), 'default uninstall removes the dedicated uploads cache directory' );
 
 update_option( 'gml_translate_uninstall_delete_data', 1, false );

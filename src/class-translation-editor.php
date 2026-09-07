@@ -103,19 +103,9 @@ class GML_Translation_Editor_Core {
         if ( ! $row ) {
             wp_send_json_error( __( 'Translation could not be found.', static::TEXT_DOMAIN ) );
         }
-        $write = static function () use ( $wpdb, $table, $id, $translated ) {
-            return $wpdb->update( $table, [
-                // Translation rows are plain text inserted into existing DOM text
-                // nodes/attributes. Markup belongs to the source template and must
-                // never be introduced by a manual translation.
-                'translated_text' => $translated,
-                'status'          => 'manual',
-                'updated_at'      => current_time( 'mysql' ),
-            ], [ 'id' => $id ] );
-        };
-        $saved = ! hash_equals( (string) $row->translated_text, $translated ) && class_exists( 'GML_Resource_Readiness' )
-            ? GML_Resource_Readiness::apply_translation_change( $row->source_hash, $row->target_lang, $write )
-            : $write();
+        // Translation rows are plain text inserted into existing DOM text
+        // nodes/attributes. Markup belongs to the source template.
+        $saved = GML_Translation_Memory::update_by_id( $id, $translated, 'manual' );
         if ( false === $saved ) {
             wp_send_json_error( __( 'Translation could not be saved.', static::TEXT_DOMAIN ) );
         }
@@ -154,12 +144,7 @@ class GML_Translation_Editor_Core {
             "SELECT source_hash, source_lang, target_lang FROM $table WHERE id = %d", $id
         ) );
 
-        $delete = static function () use ( $wpdb, $table, $id ) {
-            return $wpdb->delete( $table, [ 'id' => $id ] );
-        };
-        $deleted = $row && class_exists( 'GML_Resource_Readiness' )
-            ? GML_Resource_Readiness::apply_translation_change( $row->source_hash, $row->target_lang, $delete )
-            : $delete();
+        $deleted = $row ? GML_Translation_Memory::delete_by_id( $id ) : false;
         if ( false === $deleted ) {
             wp_send_json_error( __( 'Translation could not be deleted.', static::TEXT_DOMAIN ) );
         }
