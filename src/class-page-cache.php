@@ -94,10 +94,26 @@ class GML_Page_Cache {
      * cannot be portably enumerated by transient-name prefix.
      */
     public static function force_invalidate() {
+        global $wpdb;
+
+        // Ensure the non-autoloaded option exists, then increment its database
+        // value atomically. A read-plus-update_option sequence can lose one of
+        // two concurrent invalidations and leave a response cached between the
+        // corresponding commits under the newer namespace.
+        self::generation();
+        $updated = $wpdb->query( $wpdb->prepare(
+            "UPDATE {$wpdb->options} SET option_value=CAST(option_value AS UNSIGNED)+1 WHERE option_name=%s",
+            self::GENERATION_OPTION
+        ) );
+        if ( $updated !== 1 ) {
+            return false;
+        }
+
         self::$invalidated = true;
-        $generation = self::generation() + 1;
-        return update_option( self::GENERATION_OPTION, $generation, false )
-            || self::generation() === $generation;
+        wp_cache_delete( self::GENERATION_OPTION, 'options' );
+        wp_cache_delete( 'alloptions', 'options' );
+        wp_cache_delete( 'notoptions', 'options' );
+        return true;
     }
 
     public static function generation() {

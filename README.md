@@ -28,6 +28,21 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.1 Human Review Cache Coherency
+
+Approving or rejecting an exact translation snapshot now rotates the rendered
+page-cache namespace inside the same database transaction as the current review
+row and append-only audit event. The generation uses an atomic database
+increment, so concurrent review or content invalidations cannot collapse into a
+single stale namespace. Anonymous routing, canonical, hreflang, and sitemap
+output therefore cannot keep serving an older publication decision from Redis,
+Memcached, or database transients after a reviewer acts.
+
+If the cache generation cannot be updated, the review decision and its audit
+event are rolled back and the existing decision remains authoritative. Database
+regressions cover approval, rejection, cache-write failure, and bounded product
+indexability reads.
+
 ## 0.9.0 Derived Publication Eligibility
 
 Phase 2D adds one product-neutral, derived publication decision for every exact

@@ -428,6 +428,12 @@ final class GML_Resource_Approval {
                 'review_note' => $note,
                 'created_at' => $now,
             ] ) ) throw new RuntimeException( 'audit_write_failed' );
+            // Approval changes public routing and SEO output. Rotate the shared
+            // HTML-cache namespace in the same database transaction so an old
+            // eligible or ineligible response cannot survive the decision.
+            if ( class_exists( 'GML_Page_Cache' ) && false === GML_Page_Cache::force_invalidate() ) {
+                throw new RuntimeException( 'cache_invalidation_failed' );
+            }
             if ( false === self::transaction_command( 'COMMIT' ) ) throw new RuntimeException( 'commit_failed' );
         } catch ( Throwable $error ) {
             self::transaction_command( 'ROLLBACK', false );
@@ -440,6 +446,9 @@ final class GML_Resource_Approval {
             } elseif ( $error->getMessage() === 'commit_failed' ) {
                 $code = 'gml_review_transaction';
                 $message = 'The review transaction could not commit. No success was reported.';
+            } elseif ( $error->getMessage() === 'cache_invalidation_failed' ) {
+                $code = 'gml_review_cache';
+                $message = 'The review decision was not saved because the translated page cache could not be invalidated.';
             } else {
                 $code = 'gml_review_write';
                 $message = 'The review decision could not be saved. No partial decision was kept.';

@@ -9,6 +9,7 @@ if ( $source_core ) {
         'class-installer.php',
         'class-resource-identity.php',
         'class-resource-manifest-store.php',
+        'class-page-cache.php',
         'class-resource-approval.php',
         'class-public-eligibility.php',
     ] as $file ) {
@@ -99,8 +100,10 @@ gml_phase2d_complete( $noindex_resource, 'noindex' );
 $unreviewed = GML_Public_Eligibility::get_status( $approved_resource, 'qa' );
 gml_db_assert( ! $unreviewed['public_eligible'] && $unreviewed['reason'] === 'unreviewed', 'machine-complete but unreviewed target fails closed' );
 
+$cache_generation = GML_Page_Cache::generation();
 $approved = gml_phase2d_approve( $approved_resource );
 gml_db_assert( ! is_wp_error( $approved ), 'current translation snapshot can be approved' );
+gml_db_assert( GML_Page_Cache::generation() > $cache_generation, 'approval rotates the translated page-cache namespace' );
 $eligible = GML_Public_Eligibility::get_status( $approved_resource, 'qa' );
 gml_db_assert( $eligible['public_eligible'] && $eligible['reason'] === 'eligible', 'exact approved current snapshot becomes public eligible' );
 gml_db_assert( strpos( $eligible['url'], '/qa/phase2d-approved/' ) !== false, 'eligible route contains one language prefix under root or subdirectory' );
@@ -112,6 +115,32 @@ gml_db_assert( ! $disabled['public_eligible'] && $disabled['reason'] === 'langua
 $external = GML_Public_Eligibility::get_status( $approved_resource, 'qx' );
 gml_db_assert( ! $external['public_eligible'] && $external['reason'] === 'external_unverified', 'external unverified target is not published' );
 
+$approved_snapshot = GML_Resource_Approval::get_status( $approved_resource, 'qa' );
+$audit_before_cache_failure = count( GML_Resource_Approval::get_audit( $approved_resource, 'qa' ) );
+$fail_cache_generation = static function( $sql ) use ( $wpdb ) {
+    $needle = "UPDATE {$wpdb->options} SET option_value=CAST(option_value AS UNSIGNED)+1";
+    if ( strpos( $sql, $needle ) === 0 && strpos( $sql, GML_Page_Cache::GENERATION_OPTION ) !== false ) {
+        return "UPDATE {$wpdb->prefix}gml_missing_cache_generation SET option_value=1";
+    }
+    return $sql;
+};
+add_filter( 'query', $fail_cache_generation );
+$suppress_expected_cache_error = $wpdb->suppress_errors( true );
+$cache_failure = GML_Resource_Approval::reject(
+    $approved_resource,
+    'qa',
+    1,
+    'This decision must roll back.',
+    GML_Resource_Approval::expected_snapshot( $approved_snapshot )
+);
+$wpdb->suppress_errors( $suppress_expected_cache_error );
+remove_filter( 'query', $fail_cache_generation );
+gml_db_assert( is_wp_error( $cache_failure ) && $cache_failure->get_error_code() === 'gml_review_cache', 'cache invalidation failure rejects the review decision' );
+$after_cache_failure = GML_Resource_Approval::get_status( $approved_resource, 'qa' );
+gml_db_assert( $after_cache_failure['review_status'] === 'approved', 'cache invalidation failure preserves the prior current decision' );
+gml_db_assert( count( GML_Resource_Approval::get_audit( $approved_resource, 'qa' ) ) === $audit_before_cache_failure, 'cache invalidation failure rolls back its audit event' );
+
+$cache_generation = GML_Page_Cache::generation();
 $rejected = GML_Resource_Approval::reject(
     $approved_resource,
     'qa',
@@ -120,6 +149,7 @@ $rejected = GML_Resource_Approval::reject(
     GML_Resource_Approval::expected_snapshot( GML_Resource_Approval::get_status( $approved_resource, 'qa' ) )
 );
 gml_db_assert( ! is_wp_error( $rejected ), 'approved current snapshot can be explicitly rejected' );
+gml_db_assert( GML_Page_Cache::generation() > $cache_generation, 'rejection rotates the translated page-cache namespace' );
 $rejected_status = GML_Public_Eligibility::get_status( $approved_resource, 'qa' );
 gml_db_assert( ! $rejected_status['public_eligible'] && $rejected_status['reason'] === 'rejected', 'rejected target fails closed' );
 gml_db_assert( ! is_wp_error( gml_phase2d_approve( $approved_resource ) ), 'rejected snapshot can be re-approved after review' );
@@ -140,7 +170,7 @@ $query_before = (int) $wpdb->num_queries;
 $clusters = GML_Public_Eligibility::get_clusters_bulk( [ $approved_resource, $noindex_resource ], [ 'entrypoint' => 'test' ] );
 $cluster_queries = (int) $wpdb->num_queries - $query_before;
 remove_filter( 'gml_translation_resource_indexable', $noindex_filter, 10 );
-gml_db_assert( $cluster_queries === 1, 'bulk public clusters avoid URL by language database reads' );
+gml_db_assert( $cluster_queries <= 3, 'bulk public clusters use bounded review and product-indexability reads without URL by language queries' );
 gml_db_assert( $clusters[ $approved_resource->get_key() ]['languages']['qa']['public_eligible'], 'bulk cluster includes eligible approved target' );
 gml_db_assert( ! $clusters[ $noindex_resource->get_key() ]['languages']['en']['public_eligible'], 'SEO noindex resource is excluded from every language cluster' );
 
