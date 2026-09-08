@@ -13,6 +13,7 @@ if ( $source_core ) {
         'class-resource-approval.php',
         'class-public-eligibility.php',
         'class-output-buffer.php',
+        'class-translation-controls.php',
     ] as $file ) {
         require_once $source_core . '/' . $file;
     }
@@ -142,6 +143,12 @@ GML_Translation_Output_Buffer::register_pretranslated_text( 'QA phase2d upstream
 gml_db_assert( ! $output_probe->rendered_readiness( $upstream_render, 'qa' ), 'upstream translation registration is isolated by target language' );
 GML_Translation_Output_Buffer::register_pretranslated_text( 'QA phase2d upstream title', 'qa' );
 gml_db_assert( $output_probe->rendered_readiness( $upstream_render, 'qa' ), 'request-local upstream translation satisfies rendered readiness without database reads' );
+$manual_refresh_generation = GML_Page_Cache::generation();
+wp_set_current_user( 1 );
+$manual_refresh = GML_Translation_Controls::refresh_cache( 'REFRESH' );
+wp_set_current_user( 0 );
+gml_db_assert( $manual_refresh === true, 'confirmed manual page-cache refresh succeeds after an earlier request invalidation' );
+gml_db_assert( GML_Page_Cache::generation() > $manual_refresh_generation, 'confirmed manual page-cache refresh always rotates the namespace' );
 gml_db_assert( strpos( $eligible['url'], '/qa/phase2d-approved/' ) !== false, 'eligible route contains one language prefix under root or subdirectory' );
 
 $source_status = GML_Public_Eligibility::get_status( $approved_resource, 'en' );

@@ -45,6 +45,11 @@ event are rolled back and the existing decision remains authoritative. Database
 regressions cover approval, rejection, cache-write failure, and bounded product
 indexability reads.
 
+An administrator-confirmed page-cache refresh always forces a new generation,
+even if another hook already invalidated once in the same request. A failed
+generation write is reported as an error instead of presenting a silent
+success.
+
 Translated HTML now combines page-local translation completeness with the same
 exact resource publication decision. A backlog on unrelated resources no
 longer strips hreflang or adds an incomplete-page directive to an approved

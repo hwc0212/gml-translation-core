@@ -148,7 +148,9 @@ class GML_Translation_Controls {
     public static function refresh_cache( $confirmation = '' ) {
         if ( ! current_user_can( 'manage_options' ) ) return new WP_Error( 'forbidden', 'Unauthorized' );
         if ( ! is_string( $confirmation ) || ! hash_equals( 'REFRESH', trim( $confirmation ) ) ) return new WP_Error( 'confirmation_required', 'Type REFRESH to confirm page cache refresh. No changes were made.' );
-        GML_Page_Cache::invalidate();
+        if ( ! GML_Page_Cache::force_invalidate() ) {
+            return new WP_Error( 'cache_refresh_failed', 'The translated page-cache generation could not be updated. No cache refresh was confirmed.' );
+        }
         return true;
     }
 
