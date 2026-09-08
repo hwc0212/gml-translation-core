@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test "${GML_DATABASE_TESTS:-}" = 1
 
 scenario_count=0
-expected_scenarios=92
+expected_scenarios=94
 run_scenario() {
     local output
     if ! output="$("$@" 2>&1)"; then
@@ -99,6 +99,7 @@ for home in http://gml-regression.test http://gml-regression.test/ygnaglul; do
     run_scenario php "$ROOT/resource-readiness.php"
     run_scenario php "$ROOT/readiness-durable.php"
     run_scenario php "$ROOT/current-corpus-readiness.php"
+    run_scenario php "$ROOT/redesign-sync.php"
     run_scenario php "$ROOT/resource-approval.php"
     run_scenario php "$ROOT/resource-approval-hardening.php"
     run_scenario php "$ROOT/resource-approval-invalidation.php"

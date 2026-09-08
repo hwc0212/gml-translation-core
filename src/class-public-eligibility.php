@@ -69,13 +69,23 @@ final class GML_Public_Eligibility {
                 $machine = sanitize_key( $review['machine_status'] ?? 'unknown' ) ?: 'unknown';
                 $human = sanitize_key( $review['review_status'] ?? 'blocked' ) ?: 'blocked';
                 $snapshot_matches = ! empty( $review['snapshot_matches'] );
+                $review_required = self::review_required( $resource, $lang, $context );
+                $current_rejection = $snapshot_matches && $human === 'rejected';
                 $route = self::route( $resource, $lang, $source );
                 $public = $source_public
                     && $route['valid']
                     && $machine === 'complete'
-                    && $human === 'approved'
-                    && $snapshot_matches;
-                $reason = self::target_reason( $source_public, ! empty( $indexable[ $key ] ), $route['valid'], $machine, $human, $snapshot_matches );
+                    && ! $current_rejection
+                    && ( ! $review_required || ( $human === 'approved' && $snapshot_matches ) );
+                $reason = self::target_reason(
+                    $source_public,
+                    ! empty( $indexable[ $key ] ),
+                    $route['valid'],
+                    $machine,
+                    $human,
+                    $snapshot_matches,
+                    $review_required
+                );
                 $languages[ $lang ] = self::status_row(
                     $resource,
                     $lang,
@@ -85,6 +95,7 @@ final class GML_Public_Eligibility {
                     $machine,
                     $human,
                     $snapshot_matches,
+                    $review_required,
                     $review
                 );
             }
@@ -172,17 +183,24 @@ final class GML_Public_Eligibility {
         return [ 'url' => $valid ? $url : '', 'valid' => $valid ];
     }
 
-    private static function target_reason( $source_public, $indexable, $route_valid, $machine, $human, $snapshot_matches ) {
+    private static function review_required( GML_Resource_Identity $resource, $lang, array $context ) {
+        return (bool) apply_filters( 'gml_translation_review_required', false, $resource, $lang, $context );
+    }
+
+    private static function target_reason( $source_public, $indexable, $route_valid, $machine, $human, $snapshot_matches, $review_required ) {
         if ( ! $indexable ) return 'resource_noindex';
         if ( ! $source_public ) return 'source_ineligible';
         if ( ! $route_valid ) return 'route_invalid';
         if ( $machine !== 'complete' ) return $machine;
-        if ( ! $snapshot_matches && $human !== 'unreviewed' ) return 'stale';
-        if ( $human !== 'approved' ) return $human;
+        if ( $snapshot_matches && $human === 'rejected' ) return 'rejected';
+        if ( $review_required ) {
+            if ( ! $snapshot_matches && $human !== 'unreviewed' ) return 'stale';
+            if ( $human !== 'approved' ) return $human;
+        }
         return 'eligible';
     }
 
-    private static function status_row( GML_Resource_Identity $resource, $lang, array $route, $public, $reason, $machine, $human, $snapshot_matches, array $review = [] ) {
+    private static function status_row( GML_Resource_Identity $resource, $lang, array $route, $public, $reason, $machine, $human, $snapshot_matches, $review_required = false, array $review = [] ) {
         return [
             'resource_key' => $resource->get_key(),
             'target_lang' => $lang,
@@ -191,6 +209,7 @@ final class GML_Public_Eligibility {
             'machine_status' => $machine,
             'review_status' => $human,
             'snapshot_matches' => (bool) $snapshot_matches,
+            'review_required' => (bool) $review_required,
             'public_eligible' => (bool) $public,
             'reason' => sanitize_key( $reason ) ?: 'unknown',
             'review_revision' => (int) ( $review['review_revision'] ?? 0 ),
@@ -210,6 +229,7 @@ final class GML_Public_Eligibility {
             'machine_status' => 'unknown',
             'review_status' => 'blocked',
             'snapshot_matches' => false,
+            'review_required' => false,
             'public_eligible' => false,
             'reason' => sanitize_key( $reason ) ?: 'unknown',
             'review_revision' => 0,

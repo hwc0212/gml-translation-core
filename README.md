@@ -28,6 +28,26 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.2 Current-Page Publication Safety
+
+Public translated routes require 100 percent coverage of the exact current
+resource manifest. Historical Translation Memory remains reusable and is never
+deleted, but removed hashes no longer affect readiness and only newly changed
+hashes enter the queue. This prevents a redesigned page from being published
+with a mixture of current source text and older translated fragments.
+
+Exact-snapshot Human Review remains available as an optional quality workflow
+through `gml_translation_review_required`. A current explicit rejection always
+blocks the route, while ordinary sites do not need to approve every page and
+language manually. Incomplete anonymous routes remain the responsibility of
+the product adapter; GML Translate temporarily redirects them to the source and
+omits them from switchers, hreflang, and multilingual sitemap clusters.
+
+Saves to reusable builder and template records invalidate the shared manifest
+generation so dependent pages are rediscovered from authoritative rendered
+HTML. The save request itself remains bounded and performs no synchronous
+render or provider request.
+
 ## 0.9.1 Human Review Cache Coherency
 
 Approving or rejecting an exact translation snapshot now rotates the rendered
@@ -53,7 +73,8 @@ success.
 Translated HTML now combines page-local translation completeness with the same
 exact resource publication decision. A backlog on unrelated resources no
 longer strips hreflang or adds an incomplete-page directive to an approved
-page; genuinely incomplete output and unreviewed resources still fail closed.
+page. Version 0.9.2 keeps genuinely incomplete output closed while making
+per-page Human Review an optional site policy.
 Product adapters that translate WordPress gettext output before the HTML buffer
 can register those target strings in a request-local, in-memory set. Rendered
 readiness then counts the already translated strings without loading the full
@@ -69,6 +90,10 @@ readiness is complete, Human Review approved the current snapshot, and that
 approval still matches the current manifest and Translation Memory generation.
 The result is calculated from authoritative state and is never stored as a
 second `published` flag.
+
+That mandatory-review policy describes the 0.9.0 behavior. Since 0.9.2,
+machine-complete current snapshots publish by default; sites may opt back into
+mandatory exact-snapshot approval, and a current rejection still blocks.
 
 Bulk APIs load Human Review state in one joined query per 500 resources. The
 manifest table now has an additive index on its existing `source_url_hash`, so
@@ -175,7 +200,7 @@ separate actionable counts.
 Current-corpus filtering activates only after the full manifest inventory is
 complete and free of current render errors. Before that point, public readiness
 fails closed and queue controls keep the legacy scope. Public readiness requires
-all critical SEO strings and at least 95 percent current-string coverage. This
+all critical SEO strings and 100 percent current-string coverage. This
 is machine readiness, not Human Approval.
 
 Frontend readiness uses a short-lived lightweight coverage cache and does not

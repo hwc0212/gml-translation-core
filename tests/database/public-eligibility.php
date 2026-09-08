@@ -100,7 +100,12 @@ $nodes = gml_phase2d_complete( $approved_resource, 'approved' );
 gml_phase2d_complete( $noindex_resource, 'noindex' );
 
 $unreviewed = GML_Public_Eligibility::get_status( $approved_resource, 'qa' );
-gml_db_assert( ! $unreviewed['public_eligible'] && $unreviewed['reason'] === 'unreviewed', 'machine-complete but unreviewed target fails closed' );
+gml_db_assert( $unreviewed['public_eligible'] && $unreviewed['reason'] === 'eligible', 'machine-complete current target is public without mandatory per-page approval' );
+$require_review = static function() { return true; };
+add_filter( 'gml_translation_review_required', $require_review );
+$review_required = GML_Public_Eligibility::get_status( $approved_resource, 'qa' );
+gml_db_assert( ! $review_required['public_eligible'] && $review_required['reason'] === 'unreviewed', 'sites may opt into exact-snapshot approval before publication' );
+remove_filter( 'gml_translation_review_required', $require_review );
 
 $database_cache_generation = (int) $wpdb->get_var( $wpdb->prepare(
     "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s",
@@ -130,7 +135,7 @@ class GML_Phase2D_Output_Buffer_Probe extends GML_Translation_Output_Buffer {
 $output_probe = new GML_Phase2D_Output_Buffer_Probe();
 gml_db_assert( $output_probe->exact_readiness( true, $approved_resource, 'qa' ), 'approved resource output is not blocked by unrelated language backlog' );
 gml_db_assert( ! $output_probe->exact_readiness( false, $approved_resource, 'qa' ), 'incomplete rendered output still fails closed after resource approval' );
-gml_db_assert( ! $output_probe->exact_readiness( true, $noindex_resource, 'qa' ), 'unreviewed resource output remains protected' );
+gml_db_assert( $output_probe->exact_readiness( true, $noindex_resource, 'qa' ), 'complete unreviewed resource output is public in the default workflow' );
 $upstream_render = [
     'nodes' => [
         [ 'text' => 'phase2d direct source', 'hash' => md5( 'phase2d direct source' ), 'context_type' => 'text' ],
@@ -235,7 +240,10 @@ gml_db_assert( $changed === true, 'translation mutation succeeds through the Cor
 $translation_stale = GML_Public_Eligibility::get_status( $approved_resource, 'qa' );
 gml_db_assert( ! $translation_stale['public_eligible'] && $translation_stale['reason'] === 'stale', 'translation change immediately revokes publication eligibility' );
 GML_Resource_Readiness::run_rebuild_batch( 'phase2d-test' );
-gml_db_assert( ! GML_Public_Eligibility::is_eligible( $approved_resource, 'qa' ), 'readiness rebuild cannot resurrect stale Human Approval' );
+gml_db_assert( GML_Public_Eligibility::is_eligible( $approved_resource, 'qa' ), 'complete current translations republish without mandatory repeat approval' );
+add_filter( 'gml_translation_review_required', $require_review );
+gml_db_assert( ! GML_Public_Eligibility::is_eligible( $approved_resource, 'qa' ), 'opt-in review mode still requires approval of the changed exact snapshot' );
+remove_filter( 'gml_translation_review_required', $require_review );
 
 update_option( 'blog_public', '0' );
 gml_db_assert( ! GML_Public_Eligibility::is_eligible( $approved_resource, 'en' ), 'site-wide discourage-search setting excludes the source cluster' );

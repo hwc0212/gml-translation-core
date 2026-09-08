@@ -208,8 +208,8 @@ class GML_Translation_Output_Buffer {
         }
 
         /**
-         * Require all SEO strings and at least 95% of page strings to have a
-         * translation before the language page can be indexed.
+         * Require every current page string, including all SEO strings, to have
+         * a translation before the language page can be indexed.
          */
         protected function translation_is_index_ready( array $translated ) {
             $nodes        = $translated['nodes'] ?? [];
@@ -245,7 +245,7 @@ class GML_Translation_Output_Buffer {
                 }
             }
 
-            return ( $translated_count / count( $unique ) ) >= 0.95;
+            return $translated_count === count( $unique );
         }
 
         /** Determine whether this rendered text was translated in either pipeline. */

@@ -46,6 +46,10 @@ final class GML_Resource_Manifest_Manager {
         $post_id = (int) $post_id;
         if ( $post_id < 1 || wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) ) return;
         if ( ! $post instanceof WP_Post ) $post = get_post( $post_id );
+        if ( $post instanceof WP_Post && self::is_global_layout_post( $post ) ) {
+            self::bump_global_generation( 'layout_' . $post->post_type );
+            return;
+        }
         $resource = $post instanceof WP_Post ? GML_Resource_Identity::for_post( $post ) : null;
         if ( ! $resource ) {
             if ( $post instanceof WP_Post ) self::stale_post_keys( $post );
@@ -69,7 +73,12 @@ final class GML_Resource_Manifest_Manager {
 
     public static function post_deleted( $post_id, $post = null ) {
         if ( ! $post instanceof WP_Post ) $post = get_post( (int) $post_id );
-        if ( $post instanceof WP_Post ) self::stale_post_keys( $post );
+        if ( ! $post instanceof WP_Post ) return;
+        if ( self::is_global_layout_post( $post ) ) {
+            self::bump_global_generation( 'layout_deleted_' . $post->post_type );
+            return;
+        }
+        self::stale_post_keys( $post );
     }
 
     public static function global_changed() { self::bump_global_generation( 'global_content' ); }
@@ -128,6 +137,19 @@ final class GML_Resource_Manifest_Manager {
         GML_Resource_Readiness::ensure_recovery_schedule();
         if ( get_option( self::DIRTY_OPTION, [] ) && ! wp_next_scheduled( self::DIRTY_HOOK ) ) wp_schedule_single_event( time() + 15, self::DIRTY_HOOK );
         GML_Resource_Backfill::maybe_schedule();
+    }
+
+    private static function is_global_layout_post( WP_Post $post ) {
+        $types = (array) apply_filters( 'gml_translation_global_layout_post_types', [
+            'wp_block',
+            'wp_template',
+            'wp_template_part',
+            'gp_elements',
+            'ct_template',
+            'elementor_library',
+        ] );
+        $types = array_values( array_unique( array_filter( array_map( 'sanitize_key', $types ) ) ) );
+        return in_array( sanitize_key( $post->post_type ), $types, true );
     }
 
     private static function stale_post_keys( WP_Post $post ) {

@@ -184,7 +184,13 @@ $last = $nodes_b[94];
 gml_db_assert( true === $translator->save_to_index( $last['hash'], $last['text'], 'Manual QA text', 'en', 'qa', 'text', 'manual' ), 'manual Translation Memory row saved' );
 gml_db_assert( GML_Resource_Readiness::get_status( $resource_b, 'qa' ) === 'stale', 'manual Translation Memory save fails closed before asynchronous readiness rebuild' );
 GML_Resource_Readiness::run_rebuild_batch( 'test' );
-gml_db_assert( GML_Resource_Readiness::get_status( $resource_b, 'qa' ) === 'complete', 'manual Translation Memory reaches 95 percent without AI' );
+gml_db_assert( GML_Resource_Readiness::get_status( $resource_b, 'qa' ) === 'incomplete', '95 percent remains incomplete for a public resource' );
+for ( $i = 95; $i < 100; $i++ ) {
+    $node = $nodes_b[ $i ];
+    gml_db_assert( true === $translator->save_to_index( $node['hash'], $node['text'], 'QA ' . $node['text'], 'en', 'qa', 'text', 'auto' ), 'remaining current translation saved' );
+}
+GML_Resource_Readiness::run_rebuild_batch( 'test' );
+gml_db_assert( GML_Resource_Readiness::get_status( $resource_b, 'qa' ) === 'complete', '100 percent current coverage becomes complete' );
 
 // Removing a source relation does not delete historical Translation Memory.
 $history_resource = gml_phase2b_resource( 910003, 'phase2b-history' );
@@ -196,14 +202,25 @@ $history_relations = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM
 $historical_tm = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $index_table WHERE source_hash=%s", $history_nodes[1]['hash'] ) );
 gml_db_assert( $history_relations === 1 && $historical_tm === 1, 'removed source leaves the next manifest but remains in historical Translation Memory' );
 
-// A shared global generation invalidates old snapshots without rendering all resources.
+// A reusable layout save invalidates every rendered resource without synchronous rendering.
 $before_global = GML_Resource_Manifest_Manager::global_generation();
-GML_Resource_Manifest_Manager::bump_global_generation( 'test_menu_change' );
-gml_db_assert( GML_Resource_Manifest_Manager::global_generation() === $before_global + 1, 'global generation bumps once' );
+$layout_id = wp_insert_post( [
+    'post_type' => 'gp_elements',
+    'post_status' => 'publish',
+    'post_title' => 'Global layout fixture',
+    'post_content' => 'A reusable layout changed.',
+] );
+gml_db_assert( ! is_wp_error( $layout_id ), 'global layout fixture is created' );
+$http_before_layout = (int) $GLOBALS['gml_test_http_calls'];
+GML_Resource_Manifest_Manager::post_changed( $layout_id, get_post( $layout_id ), true );
+gml_db_assert( GML_Resource_Manifest_Manager::global_generation() === $before_global + 1, 'global layout save bumps the shared generation once' );
+gml_db_assert( (int) $GLOBALS['gml_test_http_calls'] === $http_before_layout, 'global layout save performs no synchronous authoritative render' );
 GML_Resource_Manifest_Manager::bump_global_generation( 'same_request_duplicate' );
 gml_db_assert( GML_Resource_Manifest_Manager::global_generation() === $before_global + 1, 'global generation does not bump twice in one request' );
 gml_db_assert( GML_Resource_Readiness::get_status( $resource_a, 'qa' ) === 'stale', 'global content change makes Page A manifest stale' );
 gml_db_assert( GML_Resource_Readiness::get_status( $resource_b, 'qa' ) === 'stale', 'global content change makes Page B manifest stale' );
+wp_delete_post( $layout_id, true );
+gml_db_assert( ! get_option( GML_Resource_Manifest_Manager::DIRTY_OPTION, [] ), 'deleted global layout does not enqueue a nonexistent per-page resource' );
 
 // One translation asset can satisfy 100 resource relationships.
 $shared_text = 'phase2b shared source hash';

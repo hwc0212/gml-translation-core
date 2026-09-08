@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Translation_Readiness {
 
-    const MIN_LANGUAGE_COVERAGE = 0.95;
+    const MIN_LANGUAGE_COVERAGE = 1.0;
 
     /** @var array<string,bool>|null */
     private static $map = null;

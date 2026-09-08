@@ -3,7 +3,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 final class GML_Resource_Readiness {
-    const COMPLETE_RATIO = 0.95;
+    const COMPLETE_RATIO = 1.0;
     const READ_CHUNK = 500;
     const REVERSE_BATCH = 500;
     const REBUILD_BATCH = 500;
