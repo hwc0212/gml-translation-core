@@ -92,14 +92,14 @@ class GML_Translation_Readiness {
     /**
      * Fail closed until the full current-site inventory is stable.
      *
-     * Stale manifests may represent deleted content and therefore do not block a
-     * completed backfill. Active dirty work and current render errors do block it.
+     * Only positively established terminal states permit obsolete classification.
+     * A stale row is not proof that the resource has been deleted.
      */
     public static function current_corpus_is_complete() {
         if ( self::$current_corpus_complete !== null ) {
             return self::$current_corpus_complete;
         }
-        if ( ! self::has_manifest_schema() || ! class_exists( 'GML_Resource_Backfill' ) ) {
+        if ( ! self::has_manifest_schema() || ! class_exists( 'GML_Resource_Backfill' ) || version_compare(get_option('gml_db_version','0'),'3.4.0','<') ) {
             self::$current_corpus_complete = false;
             return false;
         }
@@ -114,7 +114,9 @@ class GML_Translation_Readiness {
         $generation = self::global_generation();
         $row = $wpdb->get_row( $wpdb->prepare(
             "SELECT COUNT(*) AS manifest_count,
-                    SUM(CASE WHEN discovery_state IN ('unknown','render_error') THEN 1 ELSE 0 END) AS blocking_count
+                    SUM(CASE WHEN discovery_state NOT IN ('complete','excluded','permanent_redirect')
+                        OR (discovery_state='permanent_redirect' AND (redirect_destination IS NULL OR redirect_destination=''))
+                        THEN 1 ELSE 0 END) AS blocking_count
              FROM $manifests WHERE global_generation=%d",
             $generation
         ) );

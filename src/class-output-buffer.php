@@ -85,6 +85,9 @@ class GML_Translation_Output_Buffer {
             if ( ! $this->is_html( $html ) ) {
                 return $html;
             }
+            if (!GML_Resource_Manifest_Store::tables_ready()) {
+                return $this->protect_incomplete_translation($html);
+            }
 
             // ── Page-level HTML cache ────────────────────────────────────────────
             // For non-logged-in visitors, cache the fully translated HTML output

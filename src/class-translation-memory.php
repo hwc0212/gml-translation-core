@@ -143,6 +143,32 @@ final class GML_Translation_Memory {
             : false !== $mutate();
     }
 
+    /** Explicit operator hold; preserve text, reject stale snapshots and manual rows. */
+    public static function hold_auto_by_id( $id, array $expected ) {
+        global $wpdb;
+        if (!current_user_can('manage_options') || (int)$id<1 || ($expected['status']??'')!=='auto' || !GML_Resource_Manifest_Store::tables_ready()) return false;
+        $fields=['source_hash','source_text','source_lang','target_lang','translated_text','status','updated_at'];
+        foreach($fields as $field) if(!isset($expected[$field]) || !is_string($expected[$field])) return false;
+        if (!preg_match('/^[a-f0-9]{32}$/D', $expected['source_hash'])
+            || $expected['source_lang']==='' || $expected['target_lang']===''
+            || self::normalize_language($expected['source_lang']) !== $expected['source_lang']
+            || self::normalize_language($expected['target_lang']) !== $expected['target_lang']
+            || !GML_Resource_Approval::transaction_health(true)['ready']) return false;
+        $table=$wpdb->prefix.'gml_index';
+        $mutation=static function() use($wpdb,$table,$id,$expected,$fields) {
+            $row=$wpdb->get_row($wpdb->prepare("SELECT * FROM $table WHERE id=%d FOR UPDATE",$id),ARRAY_A);
+            if(!$row) return false;
+            foreach($fields as $field) if(!hash_equals($expected[$field],(string)$row[$field])) return false;
+            if(1!==$wpdb->update($table,['status'=>'pending','updated_at'=>current_time('mysql')],['id'=>(int)$id,'status'=>'auto'])) return false;
+            return !class_exists('GML_Page_Cache') || false!==GML_Page_Cache::force_invalidate();
+        };
+        $saved=GML_Resource_Readiness::apply_translation_changes([['source_hash'=>$expected['source_hash'],'target_lang'=>$expected['target_lang']]],$mutation);
+        if($saved===false) return false;
+        GML_Translation_Readiness::clear_cache();
+        if(class_exists('GML_Translator')) GML_Translator::invalidate_cache($expected['source_lang'],$expected['target_lang']);
+        return true;
+    }
+
     /** Fingerprint only effective translations required by one exact manifest. */
     public static function snapshot_fingerprint( $resource_id, $manifest_generation, $target_lang, $source_lang = '' ) {
         $fingerprints = self::snapshot_fingerprints( [ [

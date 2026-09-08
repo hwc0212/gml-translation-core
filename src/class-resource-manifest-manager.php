@@ -45,6 +45,7 @@ final class GML_Resource_Manifest_Manager {
         unset( $update );
         $post_id = (int) $post_id;
         if ( $post_id < 1 || wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) ) return;
+        self::invalidate_permanent_redirects();
         if ( ! $post instanceof WP_Post ) $post = get_post( $post_id );
         if ( $post instanceof WP_Post && self::is_global_layout_post( $post ) ) {
             self::bump_global_generation( 'layout_' . $post->post_type );
@@ -61,6 +62,7 @@ final class GML_Resource_Manifest_Manager {
 
     public static function term_changed( $term_id, $tt_id = 0, $taxonomy = '' ) {
         unset( $tt_id );
+        self::invalidate_permanent_redirects();
         $resource = GML_Resource_Identity::for_term( (int) $term_id, (string) $taxonomy );
         if ( ! $resource ) return;
         GML_Resource_Manifest_Store::mark_stale( $resource );
@@ -72,6 +74,7 @@ final class GML_Resource_Manifest_Manager {
     }
 
     public static function post_deleted( $post_id, $post = null ) {
+        self::invalidate_permanent_redirects();
         if ( ! $post instanceof WP_Post ) $post = get_post( (int) $post_id );
         if ( ! $post instanceof WP_Post ) return;
         if ( self::is_global_layout_post( $post ) ) {
@@ -82,6 +85,25 @@ final class GML_Resource_Manifest_Manager {
     }
 
     public static function global_changed() { self::bump_global_generation( 'global_content' ); }
+
+    /** Redirect targets/chains can change without the old source post changing. */
+    public static function invalidate_permanent_redirects() {
+        global $wpdb;
+        if ( ! GML_Resource_Manifest_Store::tables_ready() ) return;
+        $table = GML_Resource_Manifest_Store::manifest_table();
+        $keys = $wpdb->get_col("SELECT resource_key FROM $table WHERE discovery_state='permanent_redirect' LIMIT 201");
+        if ( ! $keys ) return;
+        // Invalidate every old proof first; a bounded dirty list is not the proof.
+        if ( false === $wpdb->query("UPDATE $table SET discovery_state='unknown' WHERE discovery_state='permanent_redirect'") ) return;
+        GML_Translation_Readiness::clear_cache();
+        $dirty = (array)get_option(self::DIRTY_OPTION, []);
+        if ( count($keys) + count($dirty) > 200 ) {
+            GML_Resource_Backfill::reset_pending('redirect_targets_changed');
+            GML_Resource_Backfill::maybe_schedule();
+            return;
+        }
+        foreach ($keys as $key) self::add_dirty($key);
+    }
 
     public static function option_changed( $option, $old_value, $value ) {
         if ( $old_value === $value ) return;
@@ -102,7 +124,16 @@ final class GML_Resource_Manifest_Manager {
     public static function add_dirty( $key ) {
         $dirty = array_values( array_unique( array_filter( (array) get_option( self::DIRTY_OPTION, [] ) ) ) );
         $dirty[] = substr( (string) $key, 0, 191 );
-        $dirty = array_slice( array_values( array_unique( $dirty ) ), -200 );
+        $dirty = array_values(array_unique($dirty));
+        if (count($dirty) > 200) {
+            // Final merged size, including the triggering post, owns overflow.
+            foreach (array_slice($dirty, 0, count($dirty)-200) as $retired_key) {
+                GML_Resource_Manifest_Store::exclude_retired_key($retired_key);
+            }
+            GML_Resource_Backfill::reset_pending('dirty_overflow');
+            GML_Resource_Backfill::maybe_schedule();
+            $dirty = array_slice($dirty, -200);
+        }
         update_option( self::DIRTY_OPTION, $dirty, false );
         if ( ! wp_next_scheduled( self::DIRTY_HOOK ) ) wp_schedule_single_event( time() + 15, self::DIRTY_HOOK );
     }

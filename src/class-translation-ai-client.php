@@ -206,6 +206,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             throw new RuntimeException( $result['error']['message'] ?? 'Translation provider failed.' );
         }
         $translated = $this->parse_batch_output( $result['text'], count( $unique ) );
+        foreach ($translated as $position=>$translation) $this->check_translation_quality($unique[$position],$translation);
         return array_map( static function( $position ) use ( $translated ) {
             return $translated[ $position ];
         }, $positions );
@@ -235,7 +236,14 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         if ( empty( $result['ok'] ) ) {
             throw new RuntimeException( $result['error']['message'] ?? 'Translation provider failed.' );
         }
+        $this->check_translation_quality($text,$result['text']);
         return $result['text'];
+    }
+
+    private function check_translation_quality( $source, $target ) {
+        if (!GML_Translation_Text::obvious_contamination($source,$target)) return;
+        $this->last_error = ['code'=>'translation_contamination','message'=>'Obvious translation instruction leakage. Review this item before retrying.','status'=>0,'retryable'=>false];
+        throw new RuntimeException($this->last_error['message']);
     }
 
     private function call_api( $system_instruction, $user_text, $max_tokens, $retries ) {

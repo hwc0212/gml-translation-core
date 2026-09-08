@@ -250,7 +250,9 @@ $shared_after_delete = GML_Resource_Readiness::get_bulk_statuses( $shared_resour
 gml_db_assert( count( array_filter( $shared_after_delete, static function( $row ) { return ( $row['qa'] ?? '' ) === 'incomplete'; } ) ) === 100, 'deleting one Translation Memory asset recalculates all related resources without duplicate queue jobs' );
 
 // Authoritative anonymous rendering works without AI and never enqueues work.
-$render_resource = gml_phase2b_resource( 930001, 'phase2b-authoritative' );
+$render_fixture = get_page_by_path('phase2b-authoritative', OBJECT, 'page');
+$render_post_id = $render_fixture ? $render_fixture->ID : wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_name'=>'phase2b-authoritative','post_title'=>'Authoritative fixture']);
+$render_resource = GML_Resource_Identity::for_post($render_post_id);
 $render_text = 'phase2b authoritative source';
 $translator->save_to_index( md5( $render_text ), $render_text, 'QA authoritative text', 'en', 'qa', 'text', 'manual' );
 $GLOBALS['gml_phase2b_http_mode'] = 'success';
@@ -282,7 +284,9 @@ $expected_path = rtrim( wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' ) . '
 echo 'METRIC phase2b_authoritative_path=' . wp_parse_url( $GLOBALS['gml_phase2b_http_request']['url'], PHP_URL_PATH ) . "\n";
 gml_db_assert( untrailingslashit( wp_parse_url( $GLOBALS['gml_phase2b_http_request']['url'], PHP_URL_PATH ) ) === untrailingslashit( $expected_path ), 'authoritative request preserves the install path exactly once' );
 
-$failed_resource = gml_phase2b_resource( 930002, 'phase2b-render-error' );
+$failed_fixture = get_page_by_path('phase2b-render-error', OBJECT, 'page');
+$failed_post_id = $failed_fixture ? $failed_fixture->ID : wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_name'=>'phase2b-render-error','post_title'=>'Render error fixture']);
+$failed_resource = GML_Resource_Identity::for_post($failed_post_id);
 $GLOBALS['gml_phase2b_http_mode'] = 'error';
 $failed = $discovery->discover( $failed_resource );
 gml_db_assert( is_wp_error( $failed ), 'failed authoritative render returns an error' );
@@ -359,6 +363,10 @@ gml_db_assert( GML_Resource_Readiness::get_status( $external_resource, 'qx' ) ==
 update_option( 'gml_languages', $languages_before_external );
 
 // Backfill lifecycle is explicit, pausable and independent from AI work.
+// Real render fixtures enqueue source changes; drain them before testing roles.
+for ($drain=0; $drain<10 && get_option(GML_Resource_Manifest_Manager::DIRTY_OPTION, []); $drain++) GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert(!get_option(GML_Resource_Manifest_Manager::DIRTY_OPTION, []), 'real render fixture changes finish before role backfill');
+GML_Resource_Backfill::reset_pending('test_roles');
 $queue_before_backfill = (int) $wpdb->get_var( "SELECT COUNT(*) FROM $queue_table" );
 GML_Resource_Backfill::pause();
 gml_db_assert( GML_Resource_Backfill::state()['status'] === 'paused' && ! wp_next_scheduled( GML_Resource_Backfill::HOOK ), 'shadow backfill can be paused explicitly' );
@@ -383,3 +391,5 @@ echo 'METRIC phase2b_single_status_queries=' . $single_queries . "\n";
 echo 'METRIC phase2b_1000_status_queries=' . $bulk_queries . "\n";
 echo 'METRIC phase2b_backfill_post_batch_renders=' . $post_batch_http . "\n";
 echo 'OK Phase 2B shadow resource readiness for ' . $home . "\n";
+wp_delete_post($render_post_id, true);
+wp_delete_post($failed_post_id, true);

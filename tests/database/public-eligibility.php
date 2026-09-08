@@ -34,7 +34,7 @@ update_option( 'gml_multilingual_enabled', true );
 update_option( 'gml_ai_translation_enabled', false );
 
 gml_db_assert( GML_Installer::activate() === true, 'Phase 2D additive publication schema installs' );
-gml_db_assert( GML_Installer::DB_VERSION === '3.3.0', 'Phase 2D database version is active' );
+gml_db_assert( version_compare(GML_Installer::DB_VERSION,'3.3.0','>=') && get_option('gml_db_version')===GML_Installer::DB_VERSION, 'Phase 2D or newer database version is active' );
 gml_db_assert( class_exists( 'GML_Public_Eligibility' ), 'derived publication service is available' );
 
 global $wpdb;
@@ -114,7 +114,7 @@ $database_cache_generation = (int) $wpdb->get_var( $wpdb->prepare(
 $stale_cached_generation = max( $database_cache_generation, GML_Page_Cache::generation() ) + 1000;
 wp_cache_set( GML_Page_Cache::GENERATION_OPTION, $stale_cached_generation, 'options' );
 $cache_generation = GML_Page_Cache::generation();
-gml_db_assert( $cache_generation === $stale_cached_generation, 'fixture exposes a persistent-cache generation ahead of the database' );
+gml_db_assert( $cache_generation === $database_cache_generation, 'persistent-cache generation cannot override database authority' );
 $approved = gml_phase2d_approve( $approved_resource );
 gml_db_assert( ! is_wp_error( $approved ), 'current translation snapshot can be approved' );
 gml_db_assert( GML_Page_Cache::generation() > $cache_generation, 'approval rotates the translated page-cache namespace' );

@@ -23,7 +23,7 @@ class GML_Translation_Error {
 
         $configuration = [ 'provider_not_configured', 'unsafe_endpoint', 'encode_error', 'request_too_large', 'bad_request', 'authentication_error', 'not_found' ];
         $transient     = [ 'network_error', 'timeout', 'rate_limited', 'provider_unavailable' ];
-        $content       = [ 'content_blocked', 'protected_term', 'empty_result' ];
+        $content       = [ 'content_blocked', 'protected_term', 'empty_result', 'translation_contamination' ];
         $response      = [ 'invalid_json', 'empty_response', 'incomplete_response', 'output_limit', 'response_too_large' ];
         $local         = [ 'local_save_failed', 'source_too_large' ];
         if ( in_array( $code, $configuration, true ) ) $category = 'configuration';
@@ -56,6 +56,7 @@ class GML_Translation_Error {
             'empty_response' => 'Provider returned no final text', 'incomplete_response' => 'Provider returned an incomplete response',
             'output_limit' => 'Provider output was truncated', 'content_blocked' => 'Content was blocked by the provider',
             'empty_result' => 'Empty translation result', 'protected_term' => 'Protected term changed or removed',
+            'translation_contamination' => 'Translation contains unsupported output instructions',
             'local_save_failed' => 'Local translation save failed', 'source_too_large' => 'Source segment exceeds the size limit',
             'invalid_json' => 'Invalid provider response',
             'provider_not_configured' => 'AI provider is not configured', 'unsafe_endpoint' => 'Provider endpoint is not allowed',

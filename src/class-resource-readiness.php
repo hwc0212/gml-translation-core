@@ -460,7 +460,7 @@ final class GML_Resource_Readiness {
     public static function evaluate_manifest_row( $row ) {
         $state = (string) ( $row->discovery_state ?? 'unknown' );
         if ( $state === 'complete' && (int) ( $row->manifest_global_generation ?? $row->global_generation ?? 0 ) !== self::global_generation() ) return 'stale';
-        return in_array( $state, [ 'complete', 'incomplete', 'stale', 'unknown', 'disabled', 'excluded', 'render_error', 'external_unverified' ], true ) ? $state : 'unknown';
+        return in_array( $state, [ 'complete', 'incomplete', 'stale', 'unknown', 'disabled', 'excluded', 'render_error', 'external_unverified', 'permanent_redirect' ], true ) ? $state : 'unknown';
     }
 
     private static function resource_key( $subject ) {

@@ -464,6 +464,7 @@ final class GML_Resource_Approval {
         global $wpdb;
         if ( $cached !== null && ! $refresh ) return $cached;
         $tables = [
+            $wpdb->options,
             $wpdb->prefix . 'gml_index',
             GML_Resource_Manifest_Store::manifest_table(),
             GML_Resource_Manifest_Store::relation_table(),

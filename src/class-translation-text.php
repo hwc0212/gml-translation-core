@@ -3,6 +3,16 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 class GML_Translation_Text {
+    /** Narrow source-relative diagnostic, not a semantic translation verdict. */
+    public static function obvious_contamination( $source, $target ) {
+        $unsupported = [];
+        foreach ( ['GML','WordPress','WooCommerce','Gemini','DeepSeek','OpenAI','Qwen','Mistral','Claude','Plain text only','no markdown','no quotes','Final check','translation only'] as $term ) {
+            $pattern = '/\b'.preg_quote($term,'/').'\b/iu';
+            if ( preg_match($pattern,(string)$target) && !preg_match($pattern,(string)$source) ) $unsupported[]=$term;
+        }
+        return count($unsupported)>=2;
+    }
+
     /** Strip provider-supplied markup without treating <40°C as an HTML tag. */
     public static function plain_text( $text ) {
         $tokens = [

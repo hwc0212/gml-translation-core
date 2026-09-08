@@ -132,10 +132,20 @@ class GML_Page_Cache {
     }
 
     public static function generation() {
-        $generation = (int) get_option( self::GENERATION_OPTION, 0 );
+        global $wpdb;
+        // A concurrent reader can refill Redis with the pre-commit option.
+        // One indexed DB read per cache-key calculation makes that refill inert.
+        $generation = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s", self::GENERATION_OPTION
+        ));
         if ( $generation < 1 ) {
-            $generation = wp_rand( 1000000, 2147480000 );
-            update_option( self::GENERATION_OPTION, $generation, false );
+            if (self::force_invalidate()) {
+                $generation = (int)$wpdb->get_var($wpdb->prepare(
+                    "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s", self::GENERATION_OPTION
+                ));
+            }
+            // No usable DB authority: do not reuse any existing cached page.
+            if ($generation < 1) return 'unavailable-' . wp_generate_uuid4();
         }
         return $generation;
     }

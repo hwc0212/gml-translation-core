@@ -28,6 +28,44 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.3 Permanent Redirects and Narrow Quality Holds
+
+Authoritative discovery follows at most three same-origin 301/308 redirects.
+Only a final valid HTML 200 certifies a `permanent_redirect` terminal resource.
+The source retains its destination and chain, but never receives the target's
+manifest, translations, or public language cluster. Temporary redirects, loops,
+cross-origin destinations and failed targets remain blocking errors. A failed
+recheck retains the previous destination only as an exclusion hint, not proof
+of a still-valid migration. A verified source 200 can restore a normal manifest.
+
+Schema 3.4.0 adds two nullable manifest columns without renaming or removing
+existing data. An incomplete schema upgrade fails closed. Known retired WP
+identities retain excluded history; unresolved identities are not assumed
+obsolete. Source changes revoke redirect proofs and a dirty-list overflow
+schedules a new bounded inventory rather than silently losing the work.
+
+Cache-key generation now comes from an indexed database read, so another
+process cannot refill Redis with a pre-commit option value and revive old HTML.
+Manifest transitions and explicit quality holds rotate the namespace within
+their transaction. Unrelated cache namespaces are not flushed.
+
+The narrow source-relative contamination guard rejects combinations of
+unsupported provider/plugin names or output instructions. A single ambiguous
+phrase is not a hard failure. This is not a semantic quality score or a promise
+of complete hallucination detection. It never bulk-deletes Translation Memory.
+`GML_Translation_Memory::hold_auto_by_id()` requires an administrator, an exact
+current auto-translation snapshot, normalized identifiers and transactional
+storage. It retains the original text in pending status while invalidating all
+related resource snapshots. Manual translations are protected, and applying a
+hold does not start paid AI work. Recovery tools must archive the old tuple and
+current reverse references before invoking this mutation.
+
+Existing tables/options and source URL formats are unchanged. Rollback requires
+the previous product package and the pre-upgrade database/evidence snapshots;
+an older Core does not understand the new terminal-state semantics. Historical
+failure deletion remains an operator-controlled step after authoritative corpus
+verification, not an automatic part of this upgrade.
+
 ## 0.9.2 Current-Page Publication Safety
 
 Public translated routes require 100 percent coverage of the exact current

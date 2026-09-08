@@ -142,6 +142,7 @@ final class GML_Public_Eligibility {
     }
 
     private static function indexability_map( array $resources, array $context ) {
+        global $wpdb;
         $indexable = [];
         $site_public = (string) get_option( 'blog_public', '1' ) !== '0';
         foreach ( $resources as $key => $resource ) {
@@ -160,6 +161,17 @@ final class GML_Public_Eligibility {
                 $resource,
                 $context
             );
+        }
+        // A filter must not republish a redirected source or bypass a failed upgrade.
+        if ( ! GML_Resource_Manifest_Store::tables_ready() ) return array_fill_keys( array_keys($resources), false );
+        $table = GML_Resource_Manifest_Store::manifest_table();
+        foreach ( array_chunk(array_keys($resources), self::BATCH_SIZE) as $keys ) {
+            $placeholders = implode(',', array_fill(0, count($keys), '%s'));
+            $rows = $wpdb->get_results($wpdb->prepare("SELECT resource_key,discovery_state,redirect_destination FROM $table WHERE resource_key IN ($placeholders)", $keys));
+            if ($wpdb->last_error !== '') return array_fill_keys(array_keys($resources), false);
+            foreach ((array)$rows as $row) {
+                if ($row->discovery_state === 'permanent_redirect' || !empty($row->redirect_destination)) $indexable[$row->resource_key] = false;
+            }
         }
         return $indexable;
     }

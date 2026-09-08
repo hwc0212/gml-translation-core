@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '3.3.0';
+    const DB_VERSION = '3.4.0';
     const ERROR_OPTION = 'gml_translation_db_error';
 
     public static function register_hooks() {
@@ -57,6 +57,8 @@ class GML_Installer {
             self::execute( 'SET SESSION lock_wait_timeout = 2' );
             self::create_tables();
             self::ensure_phase2c1_columns();
+            self::ensure_column( $wpdb->prefix . 'gml_resource_manifests', 'redirect_destination', 'TEXT NULL' );
+            self::ensure_column( $wpdb->prefix . 'gml_resource_manifests', 'redirect_chain', 'TEXT NULL' );
             self::ensure_resource_readiness_index();
             self::ensure_resource_manifest_url_index();
             self::set_default_options();
@@ -152,6 +154,8 @@ class GML_Installer {
             required_count INT UNSIGNED NOT NULL DEFAULT 0,
             critical_count INT UNSIGNED NOT NULL DEFAULT 0,
             discovery_state VARCHAR(32) NOT NULL DEFAULT 'unknown',
+            redirect_destination TEXT NULL,
+            redirect_chain TEXT NULL,
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL,
             discovered_at DATETIME NULL,

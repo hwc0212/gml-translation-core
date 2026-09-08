@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test "${GML_DATABASE_TESTS:-}" = 1
 
 scenario_count=0
-expected_scenarios=94
+expected_scenarios=98
 run_scenario() {
     local output
     if ! output="$("$@" 2>&1)"; then
@@ -41,6 +41,7 @@ export GML_TEST_CORE_SRC="$(cd "$ROOT/../../src" && pwd)"
 run_scenario php "$ROOT/locking.php"
 unset GML_TEST_CORE_SRC
 run_scenario php "$ROOT/cache-confirmation.php"
+run_scenario php "$ROOT/cache-generation-race.php"
 run_scenario php "$ROOT/gemini-response.php"
 run_scenario php "$ROOT/failure-recovery.php"
 run_scenario php "$ROOT/seo-connection.php"
@@ -48,6 +49,7 @@ run_scenario php "$ROOT/sample-resume.php"
 run_scenario php "$ROOT/sample-schedule.php"
 run_scenario php "$ROOT/queue-scopes.php"
 run_scenario php "$ROOT/technical-text.php"
+run_scenario php "$ROOT/translation-quality.php"
 run_scenario php "$ROOT/technical-queue.php"
 run_scenario php "$ROOT/token-efficiency.php"
 run_scenario php "$ROOT/credentials.php"
@@ -99,6 +101,7 @@ for home in http://gml-regression.test http://gml-regression.test/ygnaglul; do
     run_scenario php "$ROOT/resource-readiness.php"
     run_scenario php "$ROOT/readiness-durable.php"
     run_scenario php "$ROOT/current-corpus-readiness.php"
+    run_scenario php "$ROOT/permanent-redirect.php"
     run_scenario php "$ROOT/redesign-sync.php"
     run_scenario php "$ROOT/resource-approval.php"
     run_scenario php "$ROOT/resource-approval-hardening.php"

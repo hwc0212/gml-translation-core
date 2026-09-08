@@ -10,7 +10,7 @@ final class GML_Resource_Manifest_Store {
     public static function tables_ready() {
         // The version is written only after every additive CREATE succeeds.
         // Avoid a SHOW TABLES query on each status read.
-        return version_compare( get_option( 'gml_db_version', '0' ), '3.0.0', '>=' );
+        return version_compare( get_option( 'gml_db_version', '0' ), '3.4.0', '>=' );
     }
 
     public static function save_complete( GML_Resource_Identity $resource, array $nodes ) {
@@ -50,6 +50,7 @@ final class GML_Resource_Manifest_Store {
         // URL identity, or global presentation changes still advance the
         // generation and require a fresh review.
         $unchanged = $manifest
+            && $manifest->discovery_state === 'complete'
             && hash_equals( (string) $manifest->manifest_fingerprint, $fingerprint )
             && hash_equals( (string) $manifest->source_revision, $resource->get_source_revision() )
             && hash_equals( (string) $manifest->source_url_hash, $resource->get_source_url_hash() )
@@ -59,6 +60,7 @@ final class GML_Resource_Manifest_Store {
         if ( $unchanged ) {
             $saved = $wpdb->update( $manifests, [
                 'discovery_state' => 'complete', 'updated_at' => $now, 'discovered_at' => $now,
+                'redirect_destination' => null, 'redirect_chain' => null,
             ], [ 'id' => (int) $manifest->id ] );
             if ( false === $saved ) return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be refreshed.' );
             if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::recalculate_resources( [ (int) $manifest->id ] );
@@ -79,6 +81,7 @@ final class GML_Resource_Manifest_Store {
                 'required_count' => count( $strings ),
                 'critical_count' => count( array_filter( $strings, static function( $row ) { return ! empty( $row['critical'] ); } ) ),
                 'discovery_state' => 'complete', 'updated_at' => $now, 'discovered_at' => $now,
+                'redirect_destination' => null, 'redirect_chain' => null,
             ];
             if ( $manifest ) {
                 $saved = $wpdb->update( $manifests, $data, [ 'id' => (int) $manifest->id ] );
@@ -105,6 +108,7 @@ final class GML_Resource_Manifest_Store {
                     if ( false === $wpdb->query( $sql ) ) throw new RuntimeException( 'relation_write_failed' );
                 }
             }
+            if ($manifest && !empty($manifest->redirect_destination) && false === GML_Page_Cache::force_invalidate()) throw new RuntimeException('redirect_cache_failed');
             $wpdb->query( 'COMMIT' );
         } catch ( Throwable $error ) {
             $wpdb->query( 'ROLLBACK' );
@@ -117,10 +121,11 @@ final class GML_Resource_Manifest_Store {
         return true;
     }
 
-    public static function record_state( GML_Resource_Identity $resource, $state ) {
+    public static function record_state( GML_Resource_Identity $resource, $state, array $redirect = [] ) {
         global $wpdb;
         if ( ! self::tables_ready() ) return new WP_Error( 'gml_manifest_schema', 'Resource manifest schema is unavailable.' );
-        $state = in_array( $state, [ 'unknown', 'stale', 'excluded', 'render_error', 'external_unverified' ], true ) ? $state : 'unknown';
+        $state = in_array( $state, [ 'unknown', 'stale', 'excluded', 'render_error', 'external_unverified', 'permanent_redirect' ], true ) ? $state : 'unknown';
+        if ( $state === 'permanent_redirect' && ( empty($redirect['destination']) || empty($redirect['chain']) || count($redirect['chain']) < 2 || count($redirect['chain']) > 4 ) ) return false;
         $existing = self::get_by_key( $resource->get_key() );
         $now = current_time( 'mysql' );
         $data = [
@@ -129,19 +134,70 @@ final class GML_Resource_Manifest_Store {
             'source_url_hash' => $resource->get_source_url_hash(), 'source_revision' => $resource->get_source_revision(),
             'global_generation' => class_exists( 'GML_Resource_Manifest_Manager' ) ? GML_Resource_Manifest_Manager::global_generation() : 1,
             'discovery_state' => $state, 'updated_at' => $now,
+            // A failed recheck does not prove the old source is public again.
+            // Retained hints exclude it, but only the state certifies the corpus.
+            'redirect_destination' => $state === 'permanent_redirect' ? $redirect['destination'] : ($existing->redirect_destination ?? null),
+            'redirect_chain' => $state === 'permanent_redirect' ? wp_json_encode($redirect['chain']) : ($existing->redirect_chain ?? null),
         ];
-        if ( $existing ) {
-            $saved = false === $wpdb->update( self::manifest_table(), $data, [ 'id' => (int) $existing->id ] ) ? false : true;
-            if ( $saved ) self::clear_language_readiness();
-            return $saved;
+        if ( $state === 'permanent_redirect' ) {
+            $data += [
+                'manifest_generation' => $existing ? (int)$existing->manifest_generation + 1 : 1,
+                'manifest_fingerprint' => hash('sha256', wp_json_encode($redirect)),
+                'required_count' => 0, 'critical_count' => 0, 'discovered_at' => $now,
+            ];
         }
-        $data += [
-            'resource_key' => $resource->get_key(), 'manifest_generation' => 0, 'manifest_fingerprint' => '',
-            'required_count' => 0, 'critical_count' => 0, 'created_at' => $now, 'discovered_at' => null,
-        ];
-        $saved = false !== $wpdb->insert( self::manifest_table(), $data );
-        if ( $saved ) self::clear_language_readiness();
-        return $saved;
+        if (false === $wpdb->query('START TRANSACTION')) return false;
+        try {
+            if ($existing) {
+                $saved = $wpdb->update(self::manifest_table(), $data, ['id'=>(int)$existing->id]);
+            } else {
+                $data += [
+                    'resource_key' => $resource->get_key(), 'manifest_generation' => 0, 'manifest_fingerprint' => '',
+                    'required_count' => 0, 'critical_count' => 0, 'created_at' => $now, 'discovered_at' => null,
+                ];
+                $saved = $wpdb->insert(self::manifest_table(), $data);
+            }
+            if (false === $saved || false === GML_Page_Cache::force_invalidate()) throw new RuntimeException('state_write_failed');
+            if (false === $wpdb->query('COMMIT')) throw new RuntimeException('state_commit_failed');
+        } catch (Throwable $error) {
+            $wpdb->query('ROLLBACK');
+            return false;
+        }
+        self::clear_language_readiness();
+        return true;
+    }
+
+    /** Retain history, but finish discovery for a positively retired WP identity. */
+    public static function exclude_retired_key($key) {
+        global $wpdb;
+        if (!is_string($key) || !self::tables_ready()) return false;
+        $row = self::get_by_key($key);
+        if (!$row) return false;
+        $retired = false;
+        if (preg_match('/^post:([a-z0-9_-]+):(\d+)$/', $key, $m) && post_type_exists($m[1])) {
+            $post = get_post((int)$m[2]);
+            $retired = !$post || $post->post_status !== 'publish' || $post->post_type !== $m[1];
+        } elseif (preg_match('/^term:([a-z0-9_-]+):(\d+)$/', $key, $m) && taxonomy_exists($m[1])) {
+            $term = get_term((int)$m[2], $m[1]);
+            $retired = $term === null;
+        } elseif (preg_match('/^role:(front_page|posts_page):(\d+)$/', $key, $m)) {
+            $current = $m[1] === 'front_page' ? GML_Resource_Identity::front_page() : GML_Resource_Identity::posts_page();
+            $post = (int)$m[2] > 0 ? get_post((int)$m[2]) : null;
+            $retired = ($current && $current->get_key() !== $key) || ((int)$m[2] > 0 && (!$post || $post->post_status !== 'publish'));
+        }
+        if (!$retired || $wpdb->last_error !== '') return false;
+        if (false === $wpdb->query('START TRANSACTION')) return false;
+        $saved = $wpdb->update(self::manifest_table(), [
+            'discovery_state'=>'excluded', 'updated_at'=>current_time('mysql'),
+            'global_generation'=>GML_Resource_Manifest_Manager::global_generation(),
+            'redirect_destination'=>null, 'redirect_chain'=>null,
+        ], ['id'=>(int)$row->id]);
+        if (false === $saved || false === GML_Page_Cache::force_invalidate() || false === $wpdb->query('COMMIT')) {
+            $wpdb->query('ROLLBACK');
+            return false;
+        }
+        self::clear_language_readiness();
+        return true;
     }
 
     public static function mark_stale( $subject, $revision = '' ) {
