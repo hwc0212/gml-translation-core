@@ -255,6 +255,14 @@ abstract class GML_Translation_Queue_Processor {
             } catch ( Throwable $exception ) {
                 if ( ! static::renew_process_lock( $lock_token ) ) return;
                 $diagnostic = static::provider_failure( $api, $exception->getMessage() );
+                if ( $diagnostic['code'] === 'output_limit' ) {
+                    // The provider client has already exhausted its bounded recovery.
+                    // Never repeat the same request via fallback or the next cron tick.
+                    foreach ( $items as $item ) {
+                        $this->fail_or_retry_item( $wpdb, $queue_table, $item, $exception->getMessage(), $diagnostic );
+                    }
+                    return;
+                }
                 if ( $diagnostic['category'] === 'transient' ) {
                     $this->release_processing_items( $wpdb, $queue_table, $ids );
                     static::register_backoff( $diagnostic, $api );
@@ -441,12 +449,18 @@ abstract class GML_Translation_Queue_Processor {
 
     private function fail_or_retry_item( $wpdb, $table, $item, $message, array $error = [] ) {
         $attempts = (int) $item->attempts + 1;
-        $wpdb->update( $table, [
-            'status'        => $attempts >= 3 ? 'failed' : 'pending',
+        $updated = $wpdb->update( $table, [
+            'status'        => $attempts >= 3 || ( $error['code'] ?? '' ) === 'output_limit' ? 'failed' : 'pending',
             'attempts'      => $attempts,
             'error_message' => GML_Translation_Error::stored_message( $error, $message ),
             'processed_at'  => current_time( 'mysql' ),
         ], [ 'id' => $item->id ] );
+        if ( $updated === false && ( $error['code'] ?? '' ) === 'output_limit' ) {
+            // Cron has no administrator; the internal circuit performs the pause.
+            static::open_circuit( 'Local terminal failure could not be saved; translation remains paused.' );
+            throw new RuntimeException( 'Local terminal failure persistence failed.' );
+        }
+        return $updated !== false;
     }
 
     private static function safe_error_message( $message ) {

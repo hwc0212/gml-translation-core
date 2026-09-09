@@ -28,6 +28,44 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.4 Bounded Provider Output Recovery
+
+Translation budgets now scale with source bytes, distinct item count, task
+formatting overhead and target-language expansion. Short multi-item batches
+start at 2048 tokens; the local per-request safety ceiling remains 8192.
+These conservative local caps are not claims about a model's advertised maximum.
+Known Gemini models receive documented minimal/low thinking or a zero thinking
+budget; unknown models receive no guessed fields. Supported DeepSeek chat/v4
+models explicitly request non-thinking mode. Saved provider/model selections
+are not migrated automatically.
+
+MAX_TOKENS/length output is never accepted. Recovery first raises the budget,
+then splits batches down to single items, sharing a maximum of 12 requests,
+32768 requested output tokens and 90 seconds. Network failures use queue
+backoff instead of immediate transport retries. Once output recovery begins,
+any later failure is terminal for the current attempt; a changed error category
+cannot reset the recovery allowance. Exhausted rows are failed, not automatically
+returned to pending. Failure to persist that terminal state pauses processing.
+
+All sub-batches must validate before returning to the queue. Checks include
+complete unique numbered items, protected terms, format arguments, placeholders,
+links, dimensions and obvious instruction leakage. This is not a guarantee of
+semantic translation quality; production samples still require human review.
+Only bounded numeric provider metrics are retained in request memory. They
+include failed output attempts, never credentials, source text or reasoning text.
+Provider-reported completion tokens may include reasoning; missing usage is
+unknown, not zero. No new database tables, options, scheduled work or frontend
+API calls are introduced by this patch.
+
+Offline regressions cover both providers, mixed-error recovery, terminal queue
+persistence, format integrity and unchanged Translation Memory. The database
+suite now requires 100 completed scenarios.
+
+Provider capability references, checked 2026-09-09:
+- https://ai.google.dev/gemini-api/docs/generate-content/thinking
+- https://api-docs.deepseek.com/api/create-chat-completion/
+- https://api-docs.deepseek.com/guides/thinking_mode/
+
 ## 0.9.3 Permanent Redirects and Narrow Quality Holds
 
 Authoritative discovery follows at most three same-origin 301/308 redirects.

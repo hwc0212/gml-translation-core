@@ -17,6 +17,7 @@ require_once __DIR__ . '/class-ai-http-transport.php';
 require_once __DIR__ . '/class-translation-text.php';
 require_once __DIR__ . '/class-translation-credentials.php';
 require_once __DIR__ . '/class-gemini-response.php';
+require_once __DIR__ . '/class-translation-budget.php';
 
 class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface {
 
@@ -41,6 +42,9 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
     private $tone;
     private $transport;
     private $last_error = null;
+    private $request_metrics = [];
+    private $translation_deadline = 0;
+    private $recovery_started = false;
 
     public function __construct( array $config ) {
         $this->engine        = sanitize_key( $config['engine'] ?? '' );
@@ -89,6 +93,8 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
 
     public function generate( array $request ) {
         $this->last_error = null;
+        $started = microtime( true );
+        $response = [];
         $validation = $this->validate_credentials();
         if ( ! $validation['valid'] ) {
             $this->last_error = [ 'code' => 'provider_not_configured', 'message' => $validation['message'] ];
@@ -125,6 +131,8 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
                 'retryable' => false,
             ];
             return [ 'ok' => false, 'text' => '', 'error' => $this->last_error ];
+        } finally {
+            $this->record_metrics( $response, $request, $started );
         }
     }
 
@@ -138,6 +146,31 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
 
     public function get_last_error() {
         return $this->last_error ?: $this->transport->get_last_error();
+    }
+
+    /** Numeric usage only; never retain provider text, thoughts, or credentials. */
+    public function get_request_metrics() {
+        return $this->request_metrics;
+    }
+
+    private function record_metrics( array $response, array $request, $started ) {
+        $gemini = $this->style === self::STYLE_GEMINI;
+        $usage = $gemini ? ( $response['usageMetadata'] ?? [] ) : ( $response['usage'] ?? [] );
+        $number = static function( $value ) { return is_numeric( $value ) ? max( 0, (int) $value ) : null; };
+        $reason = $gemini ? ( $response['candidates'][0]['finishReason'] ?? '' ) : ( $response['choices'][0]['finish_reason'] ?? '' );
+        $reason = in_array( $reason, [ 'STOP', 'MAX_TOKENS', 'stop', 'length', 'content_filter', 'SAFETY' ], true ) ? $reason : 'unknown';
+        $this->request_metrics[] = [
+            'engine' => $this->engine, 'model' => $this->model,
+            'max_output_tokens' => min( GML_Translation_Budget::OUTPUT_CAP, (int) ( $request['max_tokens'] ?? 4096 ) ),
+            'input_tokens' => $number( $usage[ $gemini ? 'promptTokenCount' : 'prompt_tokens' ] ?? null ),
+            'output_tokens' => $number( $usage[ $gemini ? 'candidatesTokenCount' : 'completion_tokens' ] ?? null ),
+            'reasoning_tokens' => $number( $gemini ? ( $usage['thoughtsTokenCount'] ?? null ) : ( $usage['completion_tokens_details']['reasoning_tokens'] ?? null ) ),
+            'total_tokens' => $number( $usage[ $gemini ? 'totalTokenCount' : 'total_tokens' ] ?? null ),
+            'finish_reason' => $reason,
+            'latency_ms' => (int) round( ( microtime( true ) - $started ) * 1000 ),
+            'error_code' => sanitize_key( $this->last_error['code'] ?? '' ),
+        ];
+        $this->request_metrics = array_slice( $this->request_metrics, -GML_Translation_Budget::MAX_CALLS );
     }
 
     public function test_connection() {
@@ -185,31 +218,71 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             $positions[] = $unique_map[ $key ];
         }
 
-        if ( count( $unique ) === 1 ) {
-            $translated = [ $this->translate_one( reset( $unique ), $source_lang, $target_lang, $type ) ];
-            return array_map( static function( $position ) use ( $translated ) {
-                return $translated[ $position ];
-            }, $positions );
+        if ( strlen( implode( "\n", $unique ) ) > self::MAX_PROMPT_BYTES - 256 ) {
+            $this->translation_failure( 'request_too_large', 'Translation source exceeds the request safety limit.' );
         }
-
-        $numbered = [];
-        foreach ( $unique as $index => $text ) {
-            $numbered[] = '[' . ( $index + 1 ) . '] ' . (string) $text;
+        $this->request_metrics = [];
+        $this->recovery_started = false;
+        $this->translation_deadline = microtime( true ) + GML_Translation_Budget::MAX_SECONDS;
+        $remaining_calls = GML_Translation_Budget::MAX_CALLS;
+        $remaining_tokens = GML_Translation_Budget::TOTAL_OUTPUT_CAP;
+        try {
+            $translated = $this->translate_group( $unique, $source_lang, $target_lang, $type, $remaining_calls, $remaining_tokens );
+        } catch ( Throwable $exception ) {
+            if ( $this->recovery_started ) {
+                $cause = sanitize_key( $this->get_last_error()['code'] ?? 'provider_error' );
+                $this->translation_failure( 'output_limit', 'Bounded output recovery stopped (' . $cause . '); review this item before retrying.' );
+            }
+            throw $exception;
+        } finally {
+            $this->translation_deadline = 0;
         }
-        $prompt = implode( "\n", $numbered );
-        $result = $this->generate( [
-            'system'     => $this->build_batch_instruction( $source_lang, $target_lang, $type, count( $unique ), $prompt ),
-            'prompt'     => $prompt,
-            'max_tokens' => $this->suggested_max_tokens( $prompt, $type ),
-        ] );
-        if ( empty( $result['ok'] ) ) {
-            throw new RuntimeException( $result['error']['message'] ?? 'Translation provider failed.' );
-        }
-        $translated = $this->parse_batch_output( $result['text'], count( $unique ) );
-        foreach ($translated as $position=>$translation) $this->check_translation_quality($unique[$position],$translation);
         return array_map( static function( $position ) use ( $translated ) {
             return $translated[ $position ];
         }, $positions );
+    }
+
+    private function translate_group( array $texts, $source, $target, $type, &$calls, &$tokens, $inherited_budget = 0 ) {
+        $count = count( $texts );
+        $lines = [];
+        foreach ( $texts as $index => $text ) $lines[] = '[' . ( $index + 1 ) . '] ' . $text;
+        $prompt = $count === 1 ? $texts[0] : implode( "\n", $lines );
+        $system = $count === 1 ? $this->build_system_instruction( $source, $target, $type, $prompt )
+            : $this->build_batch_instruction( $source, $target, $type, $count, $prompt );
+        $budget = max( $inherited_budget, GML_Translation_Budget::estimate( $texts, $target, $type, $this->engine, $this->model ) );
+        for ( $attempt = 0; $attempt < 2; $attempt++ ) {
+            if ( $calls < 1 || $tokens < $budget || microtime( true ) >= $this->translation_deadline - 5 ) {
+                $this->translation_failure( 'output_limit', 'Translation recovery budget exhausted; review this item before retrying.' );
+            }
+            $calls--;
+            $tokens -= $budget;
+            $result = $this->generate( [ 'system' => $system, 'prompt' => $prompt, 'max_tokens' => $budget, 'retries' => 0 ] );
+            if ( ! empty( $result['ok'] ) ) {
+                $translated = $count === 1 ? [ $result['text'] ] : $this->parse_batch_output( $result['text'], $count );
+                foreach ( $translated as $index => $text ) $this->check_translation_quality( $texts[$index], $text );
+                return $translated;
+            }
+            if ( ( $result['error']['code'] ?? '' ) !== 'output_limit' ) {
+                throw new RuntimeException( $result['error']['message'] ?? 'Translation provider failed.' );
+            }
+            $this->recovery_started = true;
+            if ( $attempt === 0 && ! $inherited_budget && $budget < GML_Translation_Budget::OUTPUT_CAP ) {
+                $budget = min( GML_Translation_Budget::OUTPUT_CAP, $budget * 2 );
+                continue;
+            }
+            break;
+        }
+        if ( $count === 1 ) $this->translation_failure( 'output_limit', 'Single translation exceeds the bounded output allowance; review current provider configuration.' );
+        $middle = (int) ceil( $count / 2 );
+        // Both halves must pass before returning anything to the persistence layer.
+        $left = $this->translate_group( array_slice( $texts, 0, $middle ), $source, $target, $type, $calls, $tokens, $budget );
+        $right = $this->translate_group( array_slice( $texts, $middle ), $source, $target, $type, $calls, $tokens, $budget );
+        return array_merge( $left, $right );
+    }
+
+    private function translation_failure( $code, $message ) {
+        $this->last_error = [ 'code' => $code, 'message' => $message, 'status' => 0, 'retryable' => false ];
+        throw new RuntimeException( $message );
     }
 
     protected function build_gemini_request_body( $system_instruction, $user_text, $max_tokens = 4096 ) {
@@ -224,23 +297,40 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         if ( $system_instruction !== '' ) {
             $body['systemInstruction'] = [ 'parts' => [ [ 'text' => (string) $system_instruction ] ] ];
         }
+        $thinking = GML_Translation_Budget::gemini_thinking( $this->model );
+        if ( $thinking ) $body['generationConfig']['thinkingConfig'] = $thinking;
         return $body;
     }
 
     private function translate_one( $text, $source_lang, $target_lang, $type ) {
-        $result = $this->generate( [
-            'system'     => $this->build_system_instruction( $source_lang, $target_lang, $type, (string) $text ),
-            'prompt'     => (string) $text,
-            'max_tokens' => $this->suggested_max_tokens( (string) $text, $type ),
-        ] );
-        if ( empty( $result['ok'] ) ) {
-            throw new RuntimeException( $result['error']['message'] ?? 'Translation provider failed.' );
-        }
-        $this->check_translation_quality($text,$result['text']);
-        return $result['text'];
+        $result = $this->translate_batch( [ (string) $text ], $source_lang, $target_lang, $type );
+        return $result[0];
     }
 
     private function check_translation_quality( $source, $target ) {
+        $formats = static function( $text ) {
+            preg_match_all( '/%%|%(?:\d+\$)?[-+ 0\x27#]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[bcdeEfFgGosuxX]/', (string) $text, $matches );
+            $ordered = [];
+            $numbered = [];
+            foreach ( $matches[0] as $format ) {
+                if ( preg_match( '/^%\d+\$/', $format ) ) $numbered[] = $format;
+                else $ordered[] = $format;
+            }
+            sort( $numbered, SORT_STRING );
+            return [ $ordered, $numbered ];
+        };
+        if ( $formats( $source ) !== $formats( $target ) ) $this->translation_failure( 'protected_term', 'Translation changed format arguments; no result was accepted.' );
+        $shape = static function( $text ) {
+            preg_match_all( '~https?://[^\s<>"\']+|\{\{[^{}]+\}\}|\{[a-zA-Z_][a-zA-Z0-9_]*\}|\b\d+(?:\.\d+)?(?:\s*[*x\x{00d7}]\s*\d+(?:\.\d+)?)+(?:\s*(?:mm|cm|m))?\b~u', (string) $text, $matches );
+            $tokens = $matches[0];
+            sort( $tokens, SORT_STRING );
+            return $tokens;
+        };
+        if ( $shape( $source ) !== $shape( $target ) ) $this->translation_failure( 'protected_term', 'Translation changed a placeholder, link, or dimension; no result was accepted.' );
+        if ( class_exists( 'GML_HTML_Parser' ) ) {
+            $parser = new GML_HTML_Parser();
+            if ( ! $parser->verify_brand_protection( $source, $target ) ) $this->translation_failure( 'protected_term', 'Translation changed a protected term; no result was accepted.' );
+        }
         if (!GML_Translation_Text::obvious_contamination($source,$target)) return;
         $this->last_error = ['code'=>'translation_contamination','message'=>'Obvious translation instruction leakage. Review this item before retrying.','status'=>0,'retryable'=>false];
         throw new RuntimeException($this->last_error['message']);
@@ -262,7 +352,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             [
                 'provider'      => $this->label,
                 'allowed_hosts' => $this->allowed_hosts,
-                'timeout'       => 60,
+                'timeout'       => $this->request_timeout(),
                 'retries'       => $retries,
             ]
         );
@@ -279,19 +369,19 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         }
         $messages[] = [ 'role' => 'user', 'content' => (string) $user_text ];
 
+        $body = [ 'model' => $this->model, 'messages' => $messages, 'temperature' => 0.2,
+            'max_tokens' => max( 1, min( GML_Translation_Budget::OUTPUT_CAP, (int) $max_tokens ) ) ];
+        if ( $this->engine === 'deepseek' && GML_Translation_Budget::deepseek_non_thinking( $this->model ) ) {
+            $body['thinking'] = [ 'type' => 'disabled' ];
+        }
         $result = $this->transport->post_json(
             $this->base_url . '/chat/completions',
             [ 'Content-Type' => 'application/json', 'Authorization' => 'Bearer ' . $this->api_key ],
-            [
-                'model'       => $this->model,
-                'messages'    => $messages,
-                'temperature' => 0.2,
-                'max_tokens'  => max( 1, min( 8192, (int) $max_tokens ) ),
-            ],
+            $body,
             [
                 'provider'      => $this->label,
                 'allowed_hosts' => $this->allowed_hosts,
-                'timeout'       => 60,
+                'timeout'       => $this->request_timeout(),
                 'retries'       => $retries,
             ]
         );
@@ -303,6 +393,9 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
 
     private function extract_text( array $response ) {
         if ( $this->style === self::STYLE_OPENAI ) {
+            $reason = $response['choices'][0]['finish_reason'] ?? '';
+            if ( $reason === 'length' ) $this->translation_failure( 'output_limit', 'Provider output limit reached; no truncated translation was accepted.' );
+            if ( $reason !== '' && $reason !== 'stop' ) $this->translation_failure( 'incomplete_response', 'Provider did not finish a complete translation.' );
             $text = $response['choices'][0]['message']['content'] ?? null;
             if ( $text === null && isset( $response['error']['message'] ) ) {
                 throw new RuntimeException( $this->label . ' API error: ' . GML_AI_HTTP_Transport::redact( $response['error']['message'] ) );
@@ -363,30 +456,24 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         } ) );
     }
 
-    private function suggested_max_tokens( $source_text, $type ) {
-        // Some providers account for internal reasoning inside the output
-        // budget. Keep a safe floor so a short title still has room for a final
-        // answer; token savings primarily come from deduplication and relevant
-        // prompt context, not from risking truncated translations.
-        if ( $type === 'seo_title' || $type === 'seo' || $type === 'seo_meta' ) return 1024;
-        return max( 1024, min( 8192, (int) ceil( strlen( (string) $source_text ) / 2 ) + 256 ) );
+    private function request_timeout() {
+        return $this->translation_deadline ? max( 5, min( 60, (int) ( $this->translation_deadline - microtime( true ) ) ) ) : 60;
     }
 
     private function parse_batch_output( $output, $expected_count ) {
         $results = [];
+        if ( ! preg_match( '/^\[1\]\s/', trim( (string) $output ) ) ) $this->translation_failure( 'incomplete_response', 'Batch output has an unexpected preamble or item order.' );
         if ( preg_match_all( '/\[(\d+)\]\s*(.+?)(?=\n\[\d+\]\s*|$)/s', trim( (string) $output ), $matches, PREG_SET_ORDER ) ) {
             foreach ( $matches as $match ) {
                 $index = (int) $match[1];
-                if ( $index < 1 || $index > $expected_count ) {
-                    continue;
-                }
-                $results[ $index ] = $this->clean_output( preg_replace( '/\s*\n\s*/', ' ', $match[2] ) );
+                if ( $index < 1 || $index > $expected_count || isset( $results[$index] ) ) $this->translation_failure( 'incomplete_response', 'Batch output contains duplicate or unexpected item identifiers.' );
+                $results[ $index ] = $this->clean_output( $match[2] );
             }
         }
         $parsed = [];
         for ( $index = 1; $index <= $expected_count; $index++ ) {
             if ( empty( $results[ $index ] ) ) {
-                throw new RuntimeException( 'Batch translation missing segment [' . $index . '] - received ' . count( $results ) . ' of ' . $expected_count . '.' );
+                $this->translation_failure( 'incomplete_response', 'Batch translation missing segment [' . $index . '] - received ' . count( $results ) . ' of ' . $expected_count . '.' );
             }
             $parsed[] = $results[ $index ];
         }
