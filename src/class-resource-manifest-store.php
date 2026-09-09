@@ -108,7 +108,7 @@ final class GML_Resource_Manifest_Store {
                     if ( false === $wpdb->query( $sql ) ) throw new RuntimeException( 'relation_write_failed' );
                 }
             }
-            if ($manifest && !empty($manifest->redirect_destination) && false === GML_Page_Cache::force_invalidate()) throw new RuntimeException('redirect_cache_failed');
+            if (!GML_Page_Cache::remember_cluster($resource_id, $resource) || !GML_Page_Cache::invalidate_resources([$resource_id])) throw new RuntimeException('cluster_cache_failed');
             $wpdb->query( 'COMMIT' );
         } catch ( Throwable $error ) {
             $wpdb->query( 'ROLLBACK' );
@@ -157,7 +157,8 @@ final class GML_Resource_Manifest_Store {
                 ];
                 $saved = $wpdb->insert(self::manifest_table(), $data);
             }
-            if (false === $saved || false === GML_Page_Cache::force_invalidate()) throw new RuntimeException('state_write_failed');
+            $resource_id = $existing ? (int)$existing->id : (int)$wpdb->insert_id;
+            if (false === $saved || !GML_Page_Cache::remember_cluster($resource_id, $resource) || !GML_Page_Cache::invalidate_resources([$resource_id])) throw new RuntimeException('state_write_failed');
             if (false === $wpdb->query('COMMIT')) throw new RuntimeException('state_commit_failed');
         } catch (Throwable $error) {
             $wpdb->query('ROLLBACK');
@@ -192,7 +193,7 @@ final class GML_Resource_Manifest_Store {
             'global_generation'=>GML_Resource_Manifest_Manager::global_generation(),
             'redirect_destination'=>null, 'redirect_chain'=>null,
         ], ['id'=>(int)$row->id]);
-        if (false === $saved || false === GML_Page_Cache::force_invalidate() || false === $wpdb->query('COMMIT')) {
+        if (false === $saved || !GML_Page_Cache::invalidate_resources([(int)$row->id]) || false === $wpdb->query('COMMIT')) {
             $wpdb->query('ROLLBACK');
             return false;
         }
@@ -206,10 +207,14 @@ final class GML_Resource_Manifest_Store {
         if ( ! $resource instanceof GML_Resource_Identity ) return false;
         $existing = self::get_by_key( $resource->get_key() );
         if ( ! $existing ) return self::record_state( $resource, 'stale' );
+        if (false === $wpdb->query('START TRANSACTION')) return false;
         $saved = false !== $wpdb->update( self::manifest_table(), [
             'source_revision' => substr( (string) ( $revision !== '' ? $revision : $resource->get_source_revision() ), 0, 191 ),
             'discovery_state' => 'stale', 'updated_at' => current_time( 'mysql' ),
         ], [ 'id' => (int) $existing->id ] );
+        $saved = $saved && GML_Page_Cache::remember_cluster((int)$existing->id, $resource)
+            && GML_Page_Cache::invalidate_resources([(int)$existing->id]) && false !== $wpdb->query('COMMIT');
+        if (!$saved) $wpdb->query('ROLLBACK');
         if ( $saved ) self::clear_language_readiness();
         return $saved;
     }
@@ -219,7 +224,13 @@ final class GML_Resource_Manifest_Store {
         if ( ! self::tables_ready() || ! is_string( $key ) || $key === '' ) return false;
         $data = [ 'discovery_state' => 'stale', 'updated_at' => current_time( 'mysql' ) ];
         if ( $revision !== '' ) $data['source_revision'] = substr( (string) $revision, 0, 191 );
-        $saved = false !== $wpdb->update( self::manifest_table(), $data, [ 'resource_key' => substr( $key, 0, 191 ) ] );
+        $existing = self::get_by_key($key);
+        if (!$existing || false === $wpdb->query('START TRANSACTION')) return false;
+        $resource = GML_Resource_Identity::resolve($key);
+        $saved = (!$resource || GML_Page_Cache::remember_cluster((int)$existing->id, $resource))
+            && false !== $wpdb->update( self::manifest_table(), $data, [ 'resource_key' => substr( $key, 0, 191 ) ] )
+            && GML_Page_Cache::invalidate_resources([(int)$existing->id]) && false !== $wpdb->query('COMMIT');
+        if (!$saved) $wpdb->query('ROLLBACK');
         if ( $saved ) self::clear_language_readiness();
         return $saved;
     }

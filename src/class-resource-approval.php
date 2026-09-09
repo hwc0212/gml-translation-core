@@ -431,7 +431,7 @@ final class GML_Resource_Approval {
             // Approval changes public routing and SEO output. Rotate the shared
             // HTML-cache namespace in the same database transaction so an old
             // eligible or ineligible response cannot survive the decision.
-            if ( class_exists( 'GML_Page_Cache' ) && false === GML_Page_Cache::force_invalidate() ) {
+            if ( class_exists( 'GML_Page_Cache' ) && false === GML_Page_Cache::invalidate_resources( [ (int)$row->resource_id ] ) ) {
                 throw new RuntimeException( 'cache_invalidation_failed' );
             }
             if ( false === self::transaction_command( 'COMMIT' ) ) throw new RuntimeException( 'commit_failed' );

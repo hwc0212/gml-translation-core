@@ -74,7 +74,7 @@ final class GML_Translation_Memory {
                 ];
                 if ( $affected === 1 ) $changes[] = [ 'source_hash' => $record['source_hash'], 'target_lang' => $record['target_lang'] ];
             }
-            return ! $changes || ! class_exists( 'GML_Page_Cache' ) || GML_Page_Cache::force_invalidate();
+            return true; // The shared mutation transaction owns cache invalidation.
         };
         $planned = array_map( static function( $r ) { return [ 'source_hash' => $r['source_hash'], 'target_lang' => $r['target_lang'] ]; }, array_values( $normalized ) );
         $result = GML_Resource_Readiness::apply_translation_changes( $planned, $mutate, static function() use ( &$changes ) { return $changes; } );
@@ -256,7 +256,7 @@ final class GML_Translation_Memory {
             if(!$row) return false;
             foreach($fields as $field) if(!hash_equals($expected[$field],(string)$row[$field])) return false;
             if(1!==$wpdb->update($table,['status'=>'pending','updated_at'=>current_time('mysql')],['id'=>(int)$id,'status'=>'auto'])) return false;
-            return !class_exists('GML_Page_Cache') || false!==GML_Page_Cache::force_invalidate();
+            return true; // The shared mutation transaction owns cache invalidation.
         };
         $saved=GML_Resource_Readiness::apply_translation_changes([['source_hash'=>$expected['source_hash'],'target_lang'=>$expected['target_lang']]],$mutation);
         if($saved===false) return false;

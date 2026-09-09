@@ -161,7 +161,7 @@ final class GML_Resource_Readiness {
                 }
                 $translation_fingerprint = (string) ( $fingerprints[ (int) $manifest->id ][ (int) $manifest->manifest_generation ][ $lang ] ?? '' );
                 if ( $lang !== $source && $status === 'complete' && $translation_fingerprint === '' ) $status = 'stale';
-                $saved = $wpdb->replace( $readiness, [
+                $data = [
                     'resource_id' => (int) $manifest->id, 'target_lang' => $lang,
                     'manifest_generation' => (int) $manifest->manifest_generation,
                     'global_generation' => (int) $manifest->global_generation,
@@ -169,8 +169,22 @@ final class GML_Resource_Readiness {
                     'critical_missing_count' => $critical_missing, 'status' => $status,
                     'translation_fingerprint' => $translation_fingerprint,
                     'calculated_at' => current_time( 'mysql' ),
-                ] );
-                if ( false !== $saved ) $written++;
+                ];
+                if ( false === $wpdb->query( 'START TRANSACTION' ) ) return $written;
+                try {
+                    $old = $wpdb->get_row( $wpdb->prepare("SELECT * FROM $readiness WHERE resource_id=%d AND target_lang=%s FOR UPDATE", $manifest->id, $lang), ARRAY_A );
+                    $changed = ! $old;
+                    foreach ( $data as $key => $value ) {
+                        if ( $key !== 'calculated_at' && (string) ( $old[$key] ?? '' ) !== (string) $value ) $changed = true;
+                    }
+                    if ( false === $wpdb->replace( $readiness, $data ) ) throw new RuntimeException('readiness_save_failed');
+                    if ( $changed && ! GML_Page_Cache::invalidate_resources( [ (int) $manifest->id ] ) ) throw new RuntimeException('cluster_invalidation_failed');
+                    if ( false === $wpdb->query('COMMIT') ) throw new RuntimeException('readiness_commit_failed');
+                    $written++;
+                } catch ( Throwable $error ) {
+                    $wpdb->query('ROLLBACK');
+                    return $written;
+                }
             }
         }
         return $written;
@@ -281,6 +295,9 @@ final class GML_Resource_Readiness {
             }
             if ( ! is_callable( $actual_changes ) ) $mutation_result = $mutation ? call_user_func( $mutation ) : true;
             if ( $mutation_result === false ) throw new RuntimeException( 'translation_mutation_failed' );
+            if ( $normalized && ( ! GML_Page_Cache::invalidate_translation_clusters( array_values( array_unique( array_column( $normalized, 'source_hash' ) ) ) ) || ! GML_Page_Cache::force_invalidate() ) ) {
+                throw new RuntimeException( 'cluster_invalidation_failed' );
+            }
             if ( false === $wpdb->query( 'COMMIT' ) ) throw new RuntimeException( 'translation_commit_failed' );
         } catch ( Throwable $error ) {
             $wpdb->query( 'ROLLBACK' );
@@ -432,7 +449,7 @@ final class GML_Resource_Readiness {
         global $wpdb;
         $readiness = GML_Resource_Manifest_Store::readiness_table();
         $written = 0;
-        foreach ( array_chunk( $rows, 100 ) as $chunk ) {
+        foreach ( array_chunk( $rows, self::REBUILD_BATCH ) as $chunk ) {
             if ( ! GML_Atomic_Option_Lock::refresh( self::REBUILD_LOCK, $token, self::CLAIM_TTL ) ) break;
             $values = [];
             $args = [];
@@ -454,7 +471,13 @@ final class GML_Resource_Readiness {
                     status=IF(status='rebuilding',VALUES(status),status)",
                 $args
             );
-            if ( false === $wpdb->query( $sql ) ) break;
+            if ( false === $wpdb->query( 'START TRANSACTION' ) ) break;
+            if ( false === $wpdb->query( $sql )
+                || ! GML_Page_Cache::invalidate_resources( array_column( $chunk, 'resource_id' ) )
+                || false === $wpdb->query( 'COMMIT' ) ) {
+                $wpdb->query( 'ROLLBACK' );
+                break;
+            }
             $written += count( $chunk );
         }
         return $written;

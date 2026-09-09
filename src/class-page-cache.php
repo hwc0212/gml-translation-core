@@ -16,6 +16,117 @@ if ( ! defined( 'ABSPATH' ) ) {
 class GML_Page_Cache {
 
     const GENERATION_OPTION = 'gml_page_cache_generation';
+    const CLUSTER_PREFIX = 'gml_cache_cluster_dirty_';
+    const URL_PREFIX = 'gml_cache_cluster_urls_';
+
+    /** Exact local members, including ineligible targets whose cached HTML may survive. */
+    public static function cluster_urls( GML_Resource_Identity $resource ) {
+        $source = $resource->get_source_url();
+        if ( $source === '' ) return [];
+        $languages = (array) get_option( 'gml_languages', [] );
+        $source_lang = get_option( 'gml_source_lang', 'en' );
+        $urls = [ $source ];
+        foreach ( $languages as $language ) {
+            if ( ! is_array( $language ) || GML_Language_Utils::is_external_language( $language ) ) continue;
+            $code = GML_Language_Utils::normalize_code( $language['code'] ?? '' );
+            if ( $code !== '' ) $urls[] = GML_URL_Helper::get_language_url( $source, $code, $source_lang, $languages );
+        }
+        return array_values( array_unique( array_filter( $urls ) ) );
+    }
+
+    /** Called inside the resource transaction; retain old URLs across slug/language changes. */
+    public static function remember_cluster( $id, GML_Resource_Identity $resource ) {
+        global $wpdb;
+        if ( (int) $id < 1 ) return false;
+        $name = self::URL_PREFIX . (int) $id;
+        if ( false === $wpdb->query( $wpdb->prepare(
+            "INSERT IGNORE INTO {$wpdb->options} (option_name,option_value,autoload) VALUES (%s,'[]','no')", $name
+        ) ) ) return false;
+        $old = $wpdb->get_var( $wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name=%s FOR UPDATE", $name) );
+        $urls = json_decode( (string) $old, true );
+        if ( ! is_array( $urls ) || $wpdb->last_error !== '' ) return false;
+        $urls = array_values( array_unique( array_merge( $urls, self::cluster_urls( $resource ) ) ) );
+        // Never silently discard an old URL that still needs maintenance.
+        if ( count( $urls ) > 256 ) return false;
+        return false !== $wpdb->query( $wpdb->prepare(
+            "UPDATE {$wpdb->options} SET option_value=%s,autoload='no' WHERE option_name=%s", wp_json_encode( $urls ), $name
+        ) );
+    }
+
+    /** Transactional durable outbox; no external IO or Redis authority. */
+    public static function invalidate_resources( array $ids ) {
+        $ids = array_values( array_unique( array_filter( array_map( 'absint', $ids ) ) ) );
+        if ( ! $ids ) return true;
+        foreach ( array_chunk( $ids, 500 ) as $chunk ) {
+            if ( ! self::record_cluster_select( 'm.id IN (' . implode( ',', $chunk ) . ')' ) ) return false;
+        }
+        return self::force_invalidate();
+    }
+
+    public static function invalidate_translation_clusters( array $hashes ) {
+        global $wpdb;
+        if ( ! $hashes ) return true;
+        foreach ( $hashes as $hash ) if ( ! preg_match( '/^[a-f0-9]{32}$/D', $hash ) ) return false;
+        $relations = GML_Resource_Manifest_Store::relation_table();
+        $where = $wpdb->prepare(
+            'EXISTS (SELECT 1 FROM ' . $relations . ' s WHERE s.resource_id=m.id AND s.manifest_generation=m.manifest_generation AND s.source_hash IN (' . implode( ',', array_fill( 0, count( $hashes ), '%s' ) ) . '))',
+            $hashes
+        );
+        return self::record_cluster_select( $where );
+    }
+
+    public static function invalidate_all_clusters() {
+        if ( ! GML_Resource_Manifest_Store::tables_ready() ) return true;
+        return self::record_cluster_select( '1=1' ) && self::force_invalidate();
+    }
+
+    private static function record_cluster_select( $where ) {
+        global $wpdb;
+        $table = GML_Resource_Manifest_Store::manifest_table();
+        return false !== $wpdb->query( $wpdb->prepare(
+            "INSERT INTO {$wpdb->options} (option_name,option_value,autoload)
+             SELECT CONCAT(%s,m.id),%s,'no' FROM $table m WHERE $where
+             ON DUPLICATE KEY UPDATE option_value=VALUES(option_value),autoload='no'",
+            self::CLUSTER_PREFIX, wp_generate_uuid4()
+        ) );
+    }
+
+    /** Bounded maintenance plan. Unresolved legacy URLs remain pending, never guessed. */
+    public static function pending_clusters( $limit = 20 ) {
+        global $wpdb;
+        if ( ! current_user_can( 'manage_options' ) ) return [];
+        $table = GML_Resource_Manifest_Store::manifest_table();
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT d.option_name,d.option_value AS token,m.id,m.resource_key,m.source_url_hash,u.option_value AS urls
+             FROM {$wpdb->options} d
+             LEFT JOIN $table m ON m.id=CAST(SUBSTRING(d.option_name,%d) AS UNSIGNED)
+             LEFT JOIN {$wpdb->options} u ON u.option_name=CONCAT(%s,SUBSTRING(d.option_name,%d))
+             WHERE d.option_name LIKE %s ORDER BY d.option_id LIMIT %d",
+            strlen(self::CLUSTER_PREFIX)+1, self::URL_PREFIX, strlen(self::CLUSTER_PREFIX)+1,
+            $wpdb->esc_like( self::CLUSTER_PREFIX ) . '%', max( 1, min( 100, (int) $limit ) )
+        ) );
+        $result = [];
+        foreach ( (array) $rows as $row ) {
+            $urls = json_decode( (string) $row->urls, true );
+            $urls = is_array( $urls ) ? $urls : [];
+            $resource = $row->resource_key ? GML_Resource_Identity::resolve( $row->resource_key ) : null;
+            if ( $resource && hash_equals( (string) $row->source_url_hash, $resource->get_source_url_hash() ) ) {
+                $urls = array_values( array_unique( array_merge( $urls, self::cluster_urls( $resource ) ) ) );
+            }
+            $result[] = [ 'name' => $row->option_name, 'token' => $row->token, 'resource_id' => (int) $row->id,
+                'resource_key' => $row->resource_key, 'urls' => $urls, 'blocked' => ! $urls ];
+        }
+        return $result;
+    }
+
+    /** Call only after every exact URL succeeded at every configured external layer. */
+    public static function acknowledge_cluster( $name, $token ) {
+        global $wpdb;
+        if ( ! current_user_can( 'manage_options' ) || ! preg_match( '/^' . self::CLUSTER_PREFIX . '[1-9][0-9]*$/D', $name ) || ! wp_is_uuid( $token ) ) return false;
+        return 1 === $wpdb->query( $wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name=%s AND option_value=%s", $name, $token
+        ) );
+    }
 
     /** @var bool Prevent repeated generation bumps during one request. */
     private static $invalidated = false;

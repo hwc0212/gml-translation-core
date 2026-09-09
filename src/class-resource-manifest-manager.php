@@ -21,6 +21,9 @@ final class GML_Resource_Manifest_Manager {
         add_action( 'customize_save_after', [ __CLASS__, 'global_changed' ] );
         add_action( 'switch_theme', [ __CLASS__, 'global_changed' ] );
         add_action( 'updated_option', [ __CLASS__, 'option_changed' ], 40, 3 );
+        foreach (['added_post_meta','updated_post_meta','deleted_post_meta','added_term_meta','updated_term_meta','deleted_term_meta'] as $hook) {
+            add_action($hook, [__CLASS__, 'seo_meta_changed'], 40, 4);
+        }
         add_action( self::DIRTY_HOOK, [ __CLASS__, 'process_dirty' ] );
         add_action( 'gml_resource_readiness_reverse', [ __CLASS__, 'process_reverse' ] );
         GML_Resource_Readiness::register_hooks();
@@ -35,6 +38,7 @@ final class GML_Resource_Manifest_Manager {
     public static function bump_global_generation( $reason = '' ) {
         if ( self::$global_bumped ) return false;
         self::$global_bumped = true;
+        if (!GML_Page_Cache::invalidate_all_clusters()) { self::$global_bumped = false; return false; }
         update_option( self::GLOBAL_OPTION, self::global_generation() + 1, false );
         GML_Resource_Backfill::reset_pending( sanitize_key( $reason ) );
         self::maybe_schedule();
@@ -86,6 +90,16 @@ final class GML_Resource_Manifest_Manager {
 
     public static function global_changed() { self::bump_global_generation( 'global_content' ); }
 
+    /** SEO metadata can change publication membership without a save_post event. */
+    public static function seo_meta_changed($meta_id, $object_id, $key, $value = null) {
+        unset($meta_id, $value);
+        if (!preg_match('/^(?:_seopress_|_yoast_wpseo_|rank_math_|_gml_seo_)/', (string)$key)) return;
+        if (strpos(current_filter(), 'term_meta') !== false) {
+            $term = get_term((int)$object_id);
+            if ($term instanceof WP_Term) self::term_changed($term->term_id, 0, $term->taxonomy);
+        } else self::post_changed((int)$object_id);
+    }
+
     /** Redirect targets/chains can change without the old source post changing. */
     public static function invalidate_permanent_redirects() {
         global $wpdb;
@@ -107,6 +121,10 @@ final class GML_Resource_Manifest_Manager {
 
     public static function option_changed( $option, $old_value, $value ) {
         if ( $old_value === $value ) return;
+        if (in_array($option, ['blog_public','gml_languages','gml_source_lang','gml_multilingual_enabled'], true)) {
+            GML_Page_Cache::invalidate_all_clusters();
+            return;
+        }
         $fixed = [ 'blogname', 'blogdescription', 'page_on_front', 'page_for_posts', 'show_on_front', 'permalink_structure', 'sidebars_widgets', 'theme_mods_' . get_option( 'stylesheet' ) ];
         $woo = [
             'woocommerce_shop_page_id', 'woocommerce_cart_page_id', 'woocommerce_checkout_page_id',

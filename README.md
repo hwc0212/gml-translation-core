@@ -40,12 +40,42 @@ Visible text is rebuilt once per complete decoded text node, preserving the
 original markup. Named/numeric entities share the same lookup; a translation
 cannot cascade into another source replacement or replace an unrelated substring.
 Stored translations, source hashes, database schema and readiness thresholds are
-unchanged. The database runner includes 105 required scenarios.
+unchanged. The database runner includes 107 required scenarios.
 
 This is a runtime corrective development revision, not production acceptance.
-Source/alternate cluster invalidation through external HTML caches remains an
-open deployment gate. GML's own generation does not purge Cloudflare or Nginx.
-Do not deploy it as a complete recovery or clear an external cache globally.
+The resource-cluster contract now records maintenance work without contacting
+external caches. Deployment and public acceptance remain separate gates.
+
+### Resource-Cluster Cache Maintenance
+
+- Readiness publication, effective TM changes, quality holds and review decisions
+  rotate the DB-authoritative GML HTML generation in their database transaction.
+  This covers the source URL and every local alternate, not just the changed target.
+- Non-autoload `gml_cache_cluster_dirty_<resource-id>` options are durable unique
+  invalidation tokens. Indexed, set-based inserts retain high-fanout work without
+  a request-side loop over all pages. No new schema or queue resume is required.
+- `gml_cache_cluster_urls_<resource-id>` retains exact local cluster URLs when
+  resources are saved, including previous slugs and disabled local languages.
+  External-domain language sites are excluded. URL history is bounded at 256;
+  exceeding that bound fails the resource write instead of silently losing URLs.
+- Administrators use `GML_Page_Cache::pending_clusters(20)` from a trusted local
+  maintenance adapter. It returns a bounded plan with exact URLs and tokens.
+  Legacy records without a URL snapshot are resolved only when their current
+  source URL hash matches; unresolvable entries remain blocked and pending.
+- Purge each plan's URLs at all configured external layers, then call
+  `acknowledge_cluster(name, token)`. Compare-and-delete refuses acknowledgement
+  after a newer change. Failed or interrupted maintenance leaves work pending.
+- GML never calls a CDN, enumerates filesystem caches, or flushes Redis here.
+  Nginx/Cloudflare credentials, paths, config inspection, dry-run, deletion and
+  audit belong to deployment tooling, outside the product and outside webroot.
+  Existing external-cache HTML is not automatically purged by a DB generation.
+- Known SEO metadata hooks invalidate manifests; integrations changing eligibility
+  solely through custom filters must call `invalidate_resources()` themselves.
+  Avoid global cache-plugin hooks when an adapter offers only a whole-site purge.
+
+Tests cover source-cache invalidation after DE completion, root/subdirectory URL
+clusters, hold, stale Redis, rollback, exact acknowledgement and concurrent changes.
+No claim of full GeneratePress/WooCommerce certification is made.
 
 ## 0.9.5 Missing-Only Recovery And Explicit Archive Discovery
 
