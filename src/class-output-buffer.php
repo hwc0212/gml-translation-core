@@ -79,6 +79,13 @@ class GML_Translation_Output_Buffer {
         self::$pretranslated_texts[ $target_lang ][ md5( $text ) ] = true;
     }
 
+    public static function is_pretranslated_text( $text, $target_lang ) {
+        $text = trim( (string) $text );
+        $target_lang = sanitize_key( $target_lang );
+        return $text !== '' && $target_lang !== ''
+            && ! empty( self::$pretranslated_texts[ $target_lang ][ md5( $text ) ] );
+    }
+
     // ── Buffer callback ───────────────────────────────────────────────────────
 
     public function process_buffer( $html ) {

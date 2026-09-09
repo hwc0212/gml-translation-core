@@ -43,6 +43,13 @@ class GML_Translation_Translator {
         foreach ( $nodes as $item ) {
             $hash = sanitize_text_field( $item['hash'] ?? '' );
             $text = (string) ( $item['text'] ?? '' );
+            // Upstream gettext has already consumed the source tuple. Never
+            // treat its target-language output as new source-language memory.
+            if ( ! $discovery && class_exists( 'GML_Translation_Output_Buffer', false )
+                && GML_Translation_Output_Buffer::is_pretranslated_text( $text, $target_lang ) ) {
+                $replacements[ $text ] = $text;
+                continue;
+            }
             if ( preg_match( '/^[a-f0-9]{32}$/', $hash ) && $text !== '' && ! isset( $unique[ $hash ] ) ) {
                 $unique[ $hash ] = [
                     'text'         => $text,

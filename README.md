@@ -28,6 +28,25 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.6 Runtime Text Authority (Deployment Gate Open)
+
+Request-local, language-specific upstream translation registrations are reused
+without looking their target text up again as a new source. Product gettext
+adapters leave formatted templates unchanged until sprintf has assembled the
+exact source represented by the HTML manifest. Native locale output is not
+replaced by the format-template adapter.
+
+Visible text is rebuilt once per complete decoded text node, preserving the
+original markup. Named/numeric entities share the same lookup; a translation
+cannot cascade into another source replacement or replace an unrelated substring.
+Stored translations, source hashes, database schema and readiness thresholds are
+unchanged. The database runner includes 105 required scenarios.
+
+This is a runtime corrective development revision, not production acceptance.
+Source/alternate cluster invalidation through external HTML caches remains an
+open deployment gate. GML's own generation does not purge Cloudflare or Nginx.
+Do not deploy it as a complete recovery or clear an external cache globally.
+
 ## 0.9.5 Missing-Only Recovery And Explicit Archive Discovery
 
 `GML_Translation_Memory::insert_missing_batch($records)` is a bounded,

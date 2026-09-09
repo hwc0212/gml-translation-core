@@ -206,26 +206,7 @@ class GML_HTML_Parser {
             return $tokenise( [ $tag ] );
         } );
 
-        // Longest originals first to avoid partial-match collisions
-        uksort( $replacements, function( $a, $b ) {
-            return mb_strlen( $b ) - mb_strlen( $a );
-        });
-
-        // Map of UTF-8 characters → common HTML entity forms found in WordPress
-        // content. DOMDocument decodes these to UTF-8 when extracting text, but
-        // the raw HTML may still contain the entity form, causing str_replace to
-        // miss. We generate entity-encoded variants of each original string.
-        $entity_map = [
-            "\u{2026}" => '&hellip;',  // …
-            "\u{2019}" => '&#8217;',   // ' right single quote
-            "\u{2018}" => '&#8216;',   // ' left single quote
-            "\u{201C}" => '&#8220;',   // " left double quote
-            "\u{201D}" => '&#8221;',   // " right double quote
-            "\u{2013}" => '&#8211;',   // – en dash
-            "\u{2014}" => '&#8212;',   // — em dash
-            "\u{00A0}" => '&nbsp;',    // non-breaking space
-        ];
-
+        $safe_replacements = [];
         foreach ( $replacements as $original => $translated ) {
             if ( $original === $translated ) continue;
 
@@ -260,22 +241,22 @@ class GML_HTML_Parser {
 
             $safe_translated = htmlspecialchars( $translated, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 
-            // Pass 1: direct UTF-8 match
-            $html = str_replace( $original, $safe_translated, $html );
-
-            // Pass 2: htmlspecialchars-encoded match (covers &amp; &lt; &gt; &quot; &#039;)
-            $enc_orig  = htmlspecialchars( $original,   ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-            if ( $enc_orig !== $original ) {
-                $html = str_replace( $enc_orig, $safe_translated, $html );
-            }
-
-            // Pass 3: HTML entity-encoded variants for smart quotes, ellipsis, dashes etc.
-            // Only run if the original contains any of the mapped characters.
-            $entity_orig = strtr( $original, $entity_map );
-            if ( $entity_orig !== $original ) {
-                $html = str_replace( $entity_orig, $safe_translated, $html );
-            }
+            $safe_replacements[ $original ] = $safe_translated;
         }
+
+        // All markup is tokenized above. Match a whole decoded text node once,
+        // just as walk() does, without serializing or reformatting the DOM.
+        // This handles mixed named/numeric entities and prevents replacements
+        // from cascading through a previously translated value.
+        $html = preg_replace_callback( '/(^|>)([^<]+)(?=<|$)/s', static function( $match ) use ( $safe_replacements ) {
+            $decoded = html_entity_decode( $match[2], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+            $key = trim( $decoded );
+            if ( ! array_key_exists( $key, $safe_replacements ) ) return $match[0];
+            $leading = strlen( $match[2] ) - strlen( ltrim( $match[2] ) );
+            $trailing = strlen( $match[2] ) - strlen( rtrim( $match[2] ) );
+            return $match[1] . substr( $match[2], 0, $leading ) . $safe_replacements[ $key ]
+                . ( $trailing ? substr( $match[2], -$trailing ) : '' );
+        }, $html );
 
         // ── Step 2b: precise title replacement ────────────────────────────────
         // The <title> tag was tokenised in step 1 (Category N) to prevent
