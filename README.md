@@ -28,6 +28,46 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.5 Missing-Only Recovery And Explicit Archive Discovery
+
+`GML_Translation_Memory::insert_missing_batch($records)` is a bounded,
+Core-owned recovery API. It inserts only tuples absent at write time. The
+existing full unique index arbitrates concurrent writers; every existing status,
+including auto, manual and pending/held, is skipped without changing its text,
+status or timestamps. Existing `upsert_batch` semantics remain unchanged: do not
+use that API for missing-only recovery.
+
+Policy B applies to tuple conflicts: insert still-missing rows and return an
+ordered ledger (`inserted`, `existing`, `duplicate_input`, row ID and existing
+status). Conflicting duplicate inputs fail before writing. Database or
+invalidation failures roll back the batch and return false. As with any database
+transaction, a lost connection during COMMIT requires a fresh authoritative
+read; callers must not blindly replay after an uncertain result. The API rejects
+nested transactions and incompatible transactional tables or tuple indexes.
+It does not replace caller authorization, source/manifest snapshot verification
+or candidate quality review. It never resumes a queue or calls a provider.
+
+Readiness generations and rendered-cache namespaces change only for inserted
+tuples, not skipped records. Database generations remain authoritative with
+Redis. No table/option rename or automatic data migration is introduced.
+
+`GML_Resource_Manifest_Discovery::discover($resource, $target_language)` is an
+explicit bridge from authoritative rendered resource discovery to missing-text
+enqueueing, including taxonomy archives. Ordinary one-argument discovery remains
+manifest-only. The optional target requires enabled local multilingual/AI
+configuration, readable credentials and no circuit breaker. It may enqueue
+while the worker is paused but never resumes it. Repeated discovery shares the
+existing site/language enqueue lock; an all-status TM recheck protects manual
+and held records even when dictionary lookup cannot serve them. Queue failures
+are reported separately from a successfully saved manifest. No production
+resource is automatically rescanned or requeued on upgrade.
+
+The real database suite requires 104 scenarios, including old-behavior red
+fixtures, real two-process missing-only races, error rollback, Redis and
+generation preservation, explicit archive enqueueing, shared-text deduplication,
+paused/AI-disabled states, root/subdirectory routing and redesign regressions.
+These are synthetic-data tests, not certification of live translation quality.
+
 ## 0.9.4 Bounded Provider Output Recovery
 
 Translation budgets now scale with source bytes, distinct item count, task

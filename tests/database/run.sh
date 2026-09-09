@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test "${GML_DATABASE_TESTS:-}" = 1
 
 scenario_count=0
-expected_scenarios=100
+expected_scenarios=104
 run_scenario() {
     local output
     if ! output="$("$@" 2>&1)"; then
@@ -54,6 +54,20 @@ run_scenario php "$ROOT/technical-queue.php"
 run_scenario php "$ROOT/token-efficiency.php"
 run_scenario php "$ROOT/provider-budget.php"
 run_scenario php "$ROOT/queue-budget.php"
+run_scenario php "$ROOT/memory-missing-only.php"
+run_scenario php "$ROOT/manifest-queue-gap.php"
+run_scenario php "$ROOT/memory-missing-concurrency.php" prepare
+memory_one_log="$(mktemp)"
+memory_two_log="$(mktemp)"
+php "$ROOT/memory-missing-concurrency.php" worker one >"$memory_one_log" 2>&1 & memory_one_pid=$!
+php "$ROOT/memory-missing-concurrency.php" worker two >"$memory_two_log" 2>&1 & memory_two_pid=$!
+wait "$memory_one_pid"
+wait "$memory_two_pid"
+cat "$memory_one_log" "$memory_two_log"
+grep -Fq 'MARKER wordpress_bootstrap_loaded' "$memory_one_log"
+grep -Fq 'MARKER wordpress_bootstrap_loaded' "$memory_two_log"
+rm -f "$memory_one_log" "$memory_two_log"
+run_scenario php "$ROOT/memory-missing-concurrency.php" verify
 run_scenario php "$ROOT/credentials.php"
 run_scenario php "$ROOT/credentials-admin.php"
 run_scenario php "$ROOT/provider-adapters.php"

@@ -11,7 +11,18 @@ final class GML_Resource_Manifest_Discovery {
         $this->parser = $parser ?: new GML_HTML_Parser();
     }
 
-    public function discover( $subject ) {
+    /** Optional target explicitly bridges authoritative discovery to the queue. */
+    public function discover( $subject, $queue_language = '' ) {
+        if ( $queue_language !== '' ) {
+            $queue_language = GML_Language_Utils::normalize_code( $queue_language );
+            $source = GML_Language_Utils::normalize_code( get_option( 'gml_source_lang', 'en' ) );
+            if ( $queue_language === '' || $queue_language === $source
+                || ! in_array( $queue_language, GML_Language_Utils::local_configured_codes( false, true ), true )
+                || ! GML_Translation_State::multilingual_enabled() || ! GML_Translation_State::ai_available()
+                || is_array( get_option( 'gml_translation_circuit_breaker', false ) ) ) {
+                return new WP_Error( 'gml_discovery_queue_disabled', 'Select an enabled local target with available AI credentials and no active circuit breaker.' );
+            }
+        }
         if (is_string($subject) && GML_Resource_Manifest_Store::exclude_retired_key($subject)) return true;
         $resource = GML_Resource_Identity::resolve( $subject );
         if ( ! $resource instanceof GML_Resource_Identity ) return new WP_Error( 'gml_resource_unknown', 'Resource identity could not be resolved.' );
@@ -39,6 +50,13 @@ final class GML_Resource_Manifest_Discovery {
             return $html;
         }
         $parsed = $this->parser->parse( $html );
-        return GML_Resource_Manifest_Store::save_complete( $current, (array) ( $parsed['nodes'] ?? [] ) );
+        $saved = GML_Resource_Manifest_Store::save_complete( $current, (array) ( $parsed['nodes'] ?? [] ) );
+        if ( $saved !== true || $queue_language === '' ) return $saved;
+        require_once __DIR__ . '/class-translator.php';
+        $queued = ( new GML_Translation_Translator() )->discover( $parsed, $queue_language );
+        if ( ( $queued['enqueue_result'] ?? false ) === false ) {
+            return new WP_Error( 'gml_discovery_queue_failed', 'Manifest saved, but queue discovery was blocked or failed. Retrying discovery never resumes AI work.' );
+        }
+        return true;
     }
 }

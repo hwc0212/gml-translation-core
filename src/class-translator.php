@@ -33,6 +33,7 @@ class GML_Translation_Translator {
         $target_lang  = sanitize_key( $target_lang );
         $nodes        = is_array( $parsed['nodes'] ?? null ) ? $parsed['nodes'] : [];
         $replacements = [];
+        if ( $discovery ) $parsed['enqueue_result'] = 0;
         if ( empty( $nodes ) || $target_lang === '' ) {
             $parsed['replacements'] = [];
             return $parsed;
@@ -63,7 +64,10 @@ class GML_Translation_Translator {
         if ( $uncached && $this->ai_translation_available()
             && ( ! get_option( 'gml_translation_paused', false ) || $discovery )
             && ! is_array( get_option( 'gml_translation_circuit_breaker', false ) ) ) {
-            $this->enqueue_missing( $uncached, $source_lang, $target_lang );
+            $enqueued = $this->enqueue_missing( $uncached, $source_lang, $target_lang );
+            if ( $discovery ) $parsed['enqueue_result'] = $enqueued;
+        } elseif ( $uncached && $discovery ) {
+            $parsed['enqueue_result'] = false;
         }
 
         $parsed['replacements'] = $replacements;
@@ -80,7 +84,7 @@ class GML_Translation_Translator {
         $inserted = 0;
         $lock = self::enqueue_lock_name( $source_lang, $target_lang );
         // Legacy queues lack a unique key. Never wait on a competing page request.
-        if ( (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 0)', $lock ) ) !== 1 ) return;
+        if ( (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 0)', $lock ) ) !== 1 ) return false;
         try {
             $queue_table    = $wpdb->prefix . 'gml_queue';
             $already_queued = [];
@@ -92,9 +96,19 @@ class GML_Translation_Translator {
                      AND source_lang = %s AND target_lang = %s",
                     array_merge( $hashes, [ $source_lang, $target_lang ] )
                 ) );
+                if ( $wpdb->last_error !== '' ) return false;
                 foreach ( (array) $rows as $row ) {
                     $already_queued[ $row->source_hash ] = true;
                 }
+                // Recheck all TM statuses inside the enqueue lock. A held row
+                // is not a dictionary hit but must never become new AI work.
+                $index = $wpdb->prefix . 'gml_index';
+                $rows = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT source_hash FROM $index WHERE source_hash IN ($placeholders) AND source_lang=%s AND target_lang=%s",
+                    array_merge( $hashes, [ $source_lang, $target_lang ] )
+                ) );
+                if ( $wpdb->last_error !== '' ) return false;
+                foreach ( (array) $rows as $row ) $already_queued[ $row->source_hash ] = true;
             }
 
             $now = current_time( 'mysql' );
@@ -103,10 +117,10 @@ class GML_Translation_Translator {
                     continue;
                 }
 				if ( strlen( $item['text'] ) > self::MAX_SOURCE_BYTES ) {
-					continue;
+					return false;
 				}
                 // Rechecking inside the lock also protects unchanged legacy tables.
-                $wpdb->query( $wpdb->prepare(
+                $result = $wpdb->query( $wpdb->prepare(
                     "INSERT IGNORE INTO $queue_table
                         (source_hash, source_text, source_lang, target_lang, context_type, priority, status, attempts, created_at)
                      VALUES (%s, %s, %s, %s, %s, %d, 'pending', 0, %s)",
@@ -118,6 +132,7 @@ class GML_Translation_Translator {
                     $this->calculate_priority( $item['text'], $item['context_type'] ),
                     $now
                 ) );
+                if ( $result === false ) return false;
                 $inserted += max( 0, (int) $wpdb->rows_affected );
             }
         } finally {
@@ -127,6 +142,7 @@ class GML_Translation_Translator {
             if ( class_exists( 'GML_Translation_Readiness' ) ) GML_Translation_Readiness::clear_cache();
             if ( class_exists( 'GML_Page_Cache' ) ) GML_Page_Cache::invalidate();
         }
+        return $inserted;
     }
 
     protected function ai_translation_available() {

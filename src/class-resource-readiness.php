@@ -192,10 +192,10 @@ final class GML_Resource_Readiness {
     }
 
     /** Atomically invalidate a bounded set of effective Translation Memory changes. */
-    public static function apply_translation_changes( array $changes, $mutation ) {
+    public static function apply_translation_changes( array $changes, $mutation, $actual_changes = null ) {
         if ( ! is_callable( $mutation ) ) return false;
         self::migrate_legacy_continuation();
-        return self::invalidate_translation_changes( $changes, $mutation, true );
+        return self::invalidate_translation_changes( $changes, $mutation, true, $actual_changes );
     }
 
     /** Convert the old single continuation into durable stale rows once. */
@@ -221,7 +221,7 @@ final class GML_Resource_Readiness {
         );
     }
 
-    private static function invalidate_translation_changes( array $changes, $mutation = null, $return_mutation = false ) {
+    private static function invalidate_translation_changes( array $changes, $mutation = null, $return_mutation = false, $actual_changes = null ) {
         global $wpdb;
         $mutation = is_callable( $mutation ) ? $mutation : null;
         $normalized = [];
@@ -244,6 +244,20 @@ final class GML_Resource_Readiness {
         $track_reviews = class_exists( 'GML_Resource_Approval' ) && GML_Resource_Approval::tables_ready();
         if ( false === $wpdb->query( 'START TRANSACTION' ) ) return false;
         try {
+            // Missing-only writes determine actual changes under the unique-key
+            // lock; invalidate only that subset, in the same transaction.
+            if ( is_callable( $actual_changes ) ) {
+                $mutation_result = $mutation ? call_user_func( $mutation ) : false;
+                if ( $mutation_result === false ) throw new RuntimeException( 'translation_mutation_failed' );
+                $actual = call_user_func( $actual_changes );
+                if ( ! is_array( $actual ) ) throw new RuntimeException( 'translation_changes_invalid' );
+                $keys = [];
+                foreach ( $actual as $change ) $keys[ $change['target_lang'] . ':' . $change['source_hash'] ] = true;
+                $normalized = array_values( array_filter( $normalized, static function( $change ) use ( $keys ) {
+                    return isset( $keys[ $change['target_lang'] . ':' . $change['source_hash'] ] );
+                } ) );
+                if ( count( $normalized ) !== count( $keys ) ) throw new RuntimeException( 'translation_changes_outside_plan' );
+            }
             $affected = 0;
             $by_language = [];
             foreach ( $normalized as $change ) $by_language[ $change['target_lang'] ][] = $change['source_hash'];
@@ -265,7 +279,7 @@ final class GML_Resource_Readiness {
             if ( $track_reviews && false === GML_Resource_Approval::bump_translation_generations_for_changes( $normalized ) ) {
                 throw new RuntimeException( 'approval_invalidation_failed' );
             }
-            $mutation_result = $mutation ? call_user_func( $mutation ) : true;
+            if ( ! is_callable( $actual_changes ) ) $mutation_result = $mutation ? call_user_func( $mutation ) : true;
             if ( $mutation_result === false ) throw new RuntimeException( 'translation_mutation_failed' );
             if ( false === $wpdb->query( 'COMMIT' ) ) throw new RuntimeException( 'translation_commit_failed' );
         } catch ( Throwable $error ) {

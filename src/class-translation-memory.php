@@ -5,6 +5,102 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 final class GML_Translation_Memory {
     const BATCH_SIZE = 100;
 
+    /**
+     * Insert absent tuples only. Existing rows of ANY status are immutable here.
+     * Conflicts are per tuple; DB/invalidation errors roll back the entire batch
+     * and return false. A returned ledger describes committed outcomes only.
+     */
+    public static function insert_missing_batch( array $records ) {
+        global $wpdb;
+        if ( count( $records ) > self::BATCH_SIZE ) return false;
+        $normalized = [];
+        $inputs = [];
+        foreach ( array_values( $records ) as $i => $record ) {
+            if ( ! is_array( $record ) ) return false;
+            $record = self::normalize_record( $record );
+            if ( ! $record || ! hash_equals( md5( $record['source_text'] ), $record['source_hash'] ) ) return false;
+            $key = self::record_key( $record );
+            $inputs[] = $key;
+            if ( ! isset( $normalized[ $key ] ) ) $normalized[ $key ] = $record;
+            elseif ( $normalized[ $key ] !== $record ) return false;
+        }
+        $summary = [ 'committed' => true, 'inserted' => 0, 'skipped' => 0, 'items' => [] ];
+        if ( ! $normalized ) return $summary;
+        if ( ! class_exists( 'GML_Resource_Approval' )
+            || ! GML_Resource_Manifest_Store::tables_ready()
+            || ! GML_Resource_Approval::transaction_health( true )['ready'] ) return false;
+        // Never implicitly commit a caller's transaction via START TRANSACTION.
+        $active = $wpdb->get_var( 'SELECT @@in_transaction' );
+        if ( $wpdb->last_error !== '' || (int) $active !== 0 ) return false;
+        $table = $wpdb->prefix . 'gml_index';
+        $indexes = $wpdb->get_results( "SHOW INDEX FROM $table WHERE Key_name='hash_lang'", ARRAY_A );
+        if ( $wpdb->last_error !== '' || count( (array) $indexes ) !== 3 ) return false;
+        usort( $indexes, static function( $a, $b ) { return (int) $a['Seq_in_index'] <=> (int) $b['Seq_in_index']; } );
+        if ( array_column( $indexes, 'Column_name' ) !== [ 'source_hash', 'source_lang', 'target_lang' ] ) return false;
+        foreach ( $indexes as $index ) if ( (int) $index['Non_unique'] !== 0 || $index['Sub_part'] !== null ) return false;
+
+        ksort( $normalized ); // Consistent lock order for overlapping batches.
+        $changes = [];
+        $outcomes = [];
+        $mutate = static function() use ( $wpdb, $table, $normalized, &$changes, &$outcomes ) {
+            $now = current_time( 'mysql' );
+            foreach ( $normalized as $key => $record ) {
+                // The unique index resolves the race atomically. Do not use
+                // INSERT IGNORE: truncation and other DB errors must abort.
+                $quiet = $wpdb->suppress_errors( true );
+                try {
+                    $affected = $wpdb->query( $wpdb->prepare(
+                    "INSERT INTO $table
+                     (source_hash,source_text,source_lang,target_lang,translated_text,context_type,status,created_at,updated_at)
+                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    $record['source_hash'], $record['source_text'], $record['source_lang'], $record['target_lang'],
+                    $record['translated_text'], $record['context_type'], $record['status'], $now, $now
+                    ) );
+                    $duplicate = $affected === false && $wpdb->dbh instanceof mysqli && mysqli_errno( $wpdb->dbh ) === 1062;
+                } finally {
+                    $wpdb->suppress_errors( $quiet );
+                }
+                if ( $affected !== 1 && ! $duplicate ) return false;
+                $row = $wpdb->get_row( $wpdb->prepare(
+                    "SELECT id,status FROM $table WHERE source_hash=%s AND source_lang=%s AND target_lang=%s FOR UPDATE",
+                    $record['source_hash'], $record['source_lang'], $record['target_lang']
+                ), ARRAY_A );
+                if ( ! $row || $wpdb->last_error !== '' ) return false;
+                $outcomes[ $key ] = [
+                    'source_hash' => $record['source_hash'], 'source_lang' => $record['source_lang'],
+                    'target_lang' => $record['target_lang'], 'id' => (int) $row['id'],
+                    'outcome' => $affected === 1 ? 'inserted' : 'existing',
+                    'existing_status' => $affected === 1 ? null : $row['status'],
+                ];
+                if ( $affected === 1 ) $changes[] = [ 'source_hash' => $record['source_hash'], 'target_lang' => $record['target_lang'] ];
+            }
+            return ! $changes || ! class_exists( 'GML_Page_Cache' ) || GML_Page_Cache::force_invalidate();
+        };
+        $planned = array_map( static function( $r ) { return [ 'source_hash' => $r['source_hash'], 'target_lang' => $r['target_lang'] ]; }, array_values( $normalized ) );
+        $result = GML_Resource_Readiness::apply_translation_changes( $planned, $mutate, static function() use ( &$changes ) { return $changes; } );
+        if ( $result === false ) return false;
+        $seen = [];
+        foreach ( $inputs as $i => $key ) {
+            $item = $outcomes[ $key ];
+            if ( isset( $seen[ $key ] ) ) $item['outcome'] = 'duplicate_input';
+            $item['index'] = $i;
+            $summary['items'][] = $item;
+            $summary[ $item['outcome'] === 'inserted' ? 'inserted' : 'skipped' ]++;
+            $seen[ $key ] = true;
+        }
+        if ( $changes ) {
+            if ( class_exists( 'GML_Translation_Readiness' ) ) GML_Translation_Readiness::clear_cache();
+            foreach ( $outcomes as $key => $outcome ) if ( $outcome['outcome'] === 'inserted' ) {
+                if ( class_exists( 'GML_Translation_Translator' ) ) {
+                    GML_Translation_Translator::invalidate_cache( $normalized[ $key ]['source_lang'], $normalized[ $key ]['target_lang'] );
+                } else {
+                    wp_cache_delete( 'gml_dict_' . $normalized[ $key ]['source_lang'] . '_' . $normalized[ $key ]['target_lang'], 'gml_translate' );
+                }
+            }
+        }
+        return $summary;
+    }
+
     public static function upsert( array $record, $protect_manual = true ) {
         $result = self::upsert_batch( [ $record ], $protect_manual );
         return $result === false ? false : true;
