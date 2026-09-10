@@ -134,7 +134,7 @@ class GML_Phase2D_Output_Buffer_Probe extends GML_Translation_Output_Buffer {
 }
 $output_probe = new GML_Phase2D_Output_Buffer_Probe();
 gml_db_assert( $output_probe->exact_readiness( true, $approved_resource, 'qa' ), 'approved resource output is not blocked by unrelated language backlog' );
-gml_db_assert( ! $output_probe->exact_readiness( false, $approved_resource, 'qa' ), 'incomplete rendered output still fails closed after resource approval' );
+gml_db_assert( $output_probe->exact_readiness( false, $approved_resource, 'qa' ), 'ordinary runtime omissions do not override the shared publication authority' );
 gml_db_assert( $output_probe->exact_readiness( true, $noindex_resource, 'qa' ), 'complete unreviewed resource output is public in the default workflow' );
 $upstream_render = [
     'nodes' => [
@@ -221,6 +221,36 @@ remove_filter( 'gml_translation_resource_indexable', $noindex_filter, 10 );
 gml_db_assert( $cluster_queries <= 3, 'bulk public clusters use bounded review and product-indexability reads without URL by language queries' );
 gml_db_assert( $clusters[ $approved_resource->get_key() ]['languages']['qa']['public_eligible'], 'bulk cluster includes eligible approved target' );
 gml_db_assert( ! $clusters[ $noindex_resource->get_key() ]['languages']['en']['public_eligible'], 'SEO noindex resource is excluded from every language cluster' );
+
+$partial_resource = gml_phase2d_fixture( 'phase2d-partial' );
+$partial_nodes = gml_phase2d_complete( $partial_resource, 'partial' );
+$partial_id = GML_Resource_Approval::get_status( $partial_resource, 'qa' )['resource_id'];
+foreach ( array_slice( $partial_nodes, 0, 2 ) as $node ) {
+    $wpdb->delete( $wpdb->prefix . 'gml_index', [ 'source_hash'=>$node['hash'], 'target_lang'=>'qa' ] );
+}
+GML_Resource_Readiness::recalculate_resources( [ $partial_id ], [ 'qa' ] );
+$partial_status = GML_Public_Eligibility::get_status( $partial_resource, 'qa' );
+gml_db_assert( $partial_status['machine_status'] === 'incomplete' && $partial_status['public_eligible'] && $partial_status['reason'] === 'eligible_partial', 'partial translation with missing title and description may publish without pretending completeness' );
+gml_db_assert( isset( GML_Public_Eligibility::get_public_urls( $partial_resource )['qa'] ), 'partial target participates in the same reciprocal cluster used by sitemap and hreflang' );
+gml_db_assert( $output_probe->exact_readiness( false, $partial_resource, 'qa' ), 'runtime omissions cannot silently strip a partial public target from hreflang' );
+add_filter( 'gml_translation_review_required', $require_review );
+gml_db_assert( ! GML_Public_Eligibility::is_eligible( $partial_resource, 'qa' ), 'explicit operator review requirement is not bypassed' );
+remove_filter( 'gml_translation_review_required', $require_review );
+$wpdb->update( $wpdb->prefix . 'gml_index', ['status'=>'pending'], ['source_hash'=>$partial_nodes[2]['hash'],'target_lang'=>'qa'] );
+GML_Resource_Readiness::recalculate_resources( [ $partial_id ], [ 'qa' ] );
+gml_db_assert( ! GML_Public_Eligibility::is_eligible( $partial_resource, 'qa' ), 'zero effective translations do not masquerade as a translated page' );
+$wpdb->replace( $wpdb->prefix . 'gml_index', [
+    'source_hash'=>$partial_nodes[0]['hash'], 'source_text'=>$partial_nodes[0]['text'],
+    'source_lang'=>'en', 'target_lang'=>'qa', 'translated_text'=>'QA restored title',
+    'context_type'=>'seo_title', 'status'=>'auto', 'created_at'=>current_time('mysql'), 'updated_at'=>current_time('mysql'),
+] );
+GML_Resource_Readiness::recalculate_resources( [ $partial_id ], [ 'qa' ] );
+gml_db_assert( GML_Public_Eligibility::is_eligible( $partial_resource, 'qa' ), 'a held segment does not block the whole page when other valid translations exist' );
+$partial_render = (new GML_Translator())->translate(['nodes'=>$partial_nodes], 'qa');
+gml_db_assert( !isset($partial_render['replacements'][$partial_nodes[2]['text']]), 'held translation remains excluded from rendering and is not republished by partial eligibility' );
+$wpdb->delete( $wpdb->prefix . 'gml_index', ['source_hash'=>$partial_nodes[2]['hash'],'target_lang'=>'qa'] );
+GML_Resource_Readiness::recalculate_resources( [ $partial_id ], [ 'qa' ] );
+gml_db_assert( GML_Public_Eligibility::is_eligible( $partial_resource, 'qa' ), 'ordinary missing text is distinct from an explicitly withheld saved translation' );
 
 $hashes = [
     $approved_resource->get_source_url_hash(),

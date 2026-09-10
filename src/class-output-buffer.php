@@ -272,17 +272,11 @@ class GML_Translation_Output_Buffer {
         }
 
         /**
-         * Combine this rendered page's completeness with the active publication
-         * authority. Phase 2D publishes per resource and exact review snapshot;
-         * an unrelated language backlog must not strip hreflang from an approved
-         * page. Older hosts without the publication service retain the legacy
-         * language-wide readiness check.
+         * One publication authority owns route/SEO consistency. Per-render
+         * omissions remain diagnostics, not a second all-or-nothing SEO gate.
+         * Hosts without that authority retain their legacy readiness behavior.
          */
         protected function publication_is_index_ready( $page_ready, $resource = null ) {
-            if ( ! $page_ready ) {
-                return false;
-            }
-
             if ( class_exists( 'GML_Public_Eligibility' ) && class_exists( 'GML_Resource_Identity' ) ) {
                 $resource = $resource instanceof GML_Resource_Identity
                     ? $resource
@@ -296,6 +290,7 @@ class GML_Translation_Output_Buffer {
                     );
             }
 
+            if ( ! $page_ready ) return false;
             return ! class_exists( 'GML_Queue_Processor' )
                 || GML_Queue_Processor::language_is_index_ready( $this->target_lang );
         }

@@ -46,6 +46,7 @@ final class GML_Public_Eligibility {
             ? GML_Resource_Approval::get_statuses_bulk( array_values( $resources ), $targets )
             : [];
         $indexable = self::indexability_map( $resources, $context );
+        $partial = self::partial_candidates( $review_statuses );
         $clusters = [];
 
         foreach ( $resources as $key => $resource ) {
@@ -70,11 +71,12 @@ final class GML_Public_Eligibility {
                 $human = sanitize_key( $review['review_status'] ?? 'blocked' ) ?: 'blocked';
                 $snapshot_matches = ! empty( $review['snapshot_matches'] );
                 $review_required = self::review_required( $resource, $lang, $context );
-                $current_rejection = $snapshot_matches && $human === 'rejected';
+                $current_rejection = $snapshot_matches && ( $review['decision'] ?? $human ) === 'rejected';
+                $partial_public = ! empty( $partial[ $key ][ $lang ] );
                 $route = self::route( $resource, $lang, $source );
                 $public = $source_public
                     && $route['valid']
-                    && $machine === 'complete'
+                    && ( $machine === 'complete' || $partial_public )
                     && ! $current_rejection
                     && ( ! $review_required || ( $human === 'approved' && $snapshot_matches ) );
                 $reason = self::target_reason(
@@ -86,6 +88,8 @@ final class GML_Public_Eligibility {
                     $snapshot_matches,
                     $review_required
                 );
+                if ( $public && $machine !== 'complete' ) $reason = 'eligible_partial';
+                if ( $current_rejection ) $reason = 'rejected';
                 $languages[ $lang ] = self::status_row(
                     $resource,
                     $lang,
@@ -115,6 +119,24 @@ final class GML_Public_Eligibility {
             ];
         }
         return $clusters;
+    }
+
+    /** Missing or withheld segments fall back to source text. Completeness stays
+     * diagnostic; an indexable language variant must contain saved translations.
+     */
+    private static function partial_candidates( array $reviews ) {
+        $candidates = [];
+        foreach ( $reviews as $key => $languages ) {
+            foreach ( $languages as $lang => $review ) {
+                if ( ( $review['machine_status'] ?? '' ) !== 'incomplete'
+                    || (int) ( $review['translated_count'] ?? 0 ) < 1
+                    || strlen( (string) ( $review['translation_fingerprint'] ?? '' ) ) !== 64 ) continue;
+                $id = (int) ( $review['resource_id'] ?? 0 );
+                if ( $id < 1 ) continue;
+                $candidates[$key][$lang] = true;
+            }
+        }
+        return $candidates;
     }
 
     public static function get_public_urls( $subject, array $context = [] ) {

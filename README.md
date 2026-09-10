@@ -28,6 +28,21 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.7 Progressive Publication
+
+Machine completeness remains a diagnostic, not a universal publication threshold.
+Current resource manifests with effective saved translations can publish partial
+language variants, including variants with untranslated title or description.
+The same authority supplies hreflang, sitemap membership and runtime SEO behavior;
+the HTML buffer no longer imposes a second 100-percent-completeness veto.
+
+Missing and quality-held segments use their original source text. Held TM is
+never returned as an effective translation or overwritten by this change.
+Source noindex, invalid routes, stale/unavailable manifests, zero effective
+translations and explicit review policy continue to control SEO eligibility.
+Products must not confuse SEO eligibility with user-facing navigation/access.
+No database migration, AI request, automatic queue resume or TM write is involved.
+
 ## 0.9.6 Runtime Text Authority (Deployment Gate Open)
 
 Request-local, language-specific upstream translation registrations are reused
