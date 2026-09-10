@@ -101,7 +101,9 @@ gml_db_assert( true === GML_Resource_Manifest_Store::save_complete( $resource, $
 $current_manifest = GML_Resource_Manifest_Store::get_by_key( $resource->get_key() );
 gml_db_assert( (int) $current_manifest->manifest_generation === (int) $legacy_manifest->manifest_generation + 1, 'redesign advances the resource manifest generation' );
 gml_db_assert( GML_Resource_Readiness::get_status( $resource, 'qr' ) === 'incomplete', 'new current strings make the translated route incomplete' );
-gml_db_assert( ! GML_Public_Eligibility::is_eligible( $resource, 'qr' ), 'an incomplete redesigned page is not anonymously publishable' );
+gml_db_assert( GML_Public_Eligibility::is_eligible( $resource, 'qr' ), 'a redesigned page with reusable current translations remains publishable while new strings are pending' );
+$partial = $translator->translate( $current, 'qr' );
+foreach ( $added as $node ) gml_db_assert( !isset($partial['replacements'][$node['text']]), 'new source content is preserved instead of substituting obsolete translation' );
 
 $current_relation_hashes = $wpdb->get_col( $wpdb->prepare(
     "SELECT source_hash FROM $relations WHERE resource_id=%d",
@@ -136,7 +138,7 @@ foreach ( $added as $hash => $node ) {
     );
 }
 GML_Resource_Readiness::run_rebuild_batch( 'redesign-sync' );
-gml_db_assert( GML_Resource_Readiness::get_status( $resource, 'qr' ) === 'complete', 'redesigned page publishes only after every current string is translated' );
+gml_db_assert( GML_Resource_Readiness::get_status( $resource, 'qr' ) === 'complete', 'completeness reaches 100 percent after every current string is translated' );
 gml_db_assert( GML_Public_Eligibility::is_eligible( $resource, 'qr' ), 'fully translated current page is anonymously publishable without mandatory review' );
 
 $translated = $translator->translate( $current, 'qr' );
