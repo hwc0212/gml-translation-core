@@ -308,6 +308,20 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
     }
 
     private function check_translation_quality( $source, $target ) {
+        // Numeric percentages in prose are not printf's space-sign flag ("95% or").
+        // Keep %% and adjacent directives such as 5%s in the format-argument check.
+        $percentages = static function( $text ) {
+            $values = [];
+            $text = preg_replace_callback( '/(?<![\p{L}\p{N}_.,])([+-]?\d+(?:[.,]\d+)?)\h*%(?=$|[\s.,;:!?)\]])/u', static function( $match ) use ( &$values ) {
+                $values[] = str_replace( ',', '.', $match[1] );
+                return $match[1] . ' ';
+            }, (string) $text );
+            sort( $values, SORT_STRING );
+            return [ $text, $values ];
+        };
+        list( $format_source, $source_percentages ) = $percentages( $source );
+        list( $format_target, $target_percentages ) = $percentages( $target );
+        $this->check_quality_tokens( $source_percentages, $target_percentages, 'percentage' );
         $formats = static function( $text ) {
             preg_match_all( '/%%|%(?:\d+\$)?[-+ 0\x27#]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[bcdeEfFgGosuxX]/', (string) $text, $matches );
             $ordered = [];
@@ -319,14 +333,24 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             sort( $numbered, SORT_STRING );
             return [ $ordered, $numbered ];
         };
-        if ( $formats( $source ) !== $formats( $target ) ) $this->translation_failure( 'protected_term', 'Translation changed format arguments; no result was accepted.' );
+        list( $source_ordered, $source_numbered ) = $formats( $format_source );
+        list( $target_ordered, $target_numbered ) = $formats( $format_target );
+        $this->check_quality_tokens( $source_ordered, $target_ordered, 'format_ordered' );
+        $this->check_quality_tokens( $source_numbered, $target_numbered, 'format_numbered' );
         $shape = static function( $text ) {
-            preg_match_all( '~https?://[^\s<>"\']+|\{\{[^{}]+\}\}|\{[a-zA-Z_][a-zA-Z0-9_]*\}|\b\d+(?:\.\d+)?(?:\s*[*x\x{00d7}]\s*\d+(?:\.\d+)?)+(?:\s*(?:mm|cm|m))?\b~u', (string) $text, $matches );
-            $tokens = $matches[0];
-            sort( $tokens, SORT_STRING );
+            preg_match_all( '~(https?://[^\s<>"\']+)|(\{\{[^{}]+\}\}|\{[a-zA-Z_][a-zA-Z0-9_]*\})|(\b\d+(?:\.\d+)?(?:\s*[*x\x{00d7}]\s*\d+(?:\.\d+)?)+(?:\s*(?:mm|cm|m))?\b)~u', (string) $text, $matches, PREG_SET_ORDER );
+            $tokens = [ 'link' => [], 'placeholder' => [], 'dimension' => [] ];
+            foreach ( $matches as $match ) {
+                $kind = ! empty( $match[1] ) ? 'link' : ( ! empty( $match[2] ) ? 'placeholder' : 'dimension' );
+                $tokens[$kind][] = $match[0];
+            }
+            foreach ( $tokens as &$values ) sort( $values, SORT_STRING );
+            unset( $values );
             return $tokens;
         };
-        if ( $shape( $source ) !== $shape( $target ) ) $this->translation_failure( 'protected_term', 'Translation changed a placeholder, link, or dimension; no result was accepted.' );
+        $source_shape = $shape( $source );
+        $target_shape = $shape( $target );
+        foreach ( $source_shape as $kind => $values ) $this->check_quality_tokens( $values, $target_shape[$kind], $kind );
         if ( class_exists( 'GML_HTML_Parser' ) ) {
             $parser = new GML_HTML_Parser();
             if ( ! $parser->verify_brand_protection( $source, $target ) ) $this->translation_failure( 'protected_term', 'Translation changed a protected term; no result was accepted.' );
@@ -334,6 +358,17 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         if (!GML_Translation_Text::obvious_contamination($source,$target)) return;
         $this->last_error = ['code'=>'translation_contamination','message'=>'Obvious translation instruction leakage. Review this item before retrying.','status'=>0,'retryable'=>false];
         throw new RuntimeException($this->last_error['message']);
+    }
+
+    private function check_quality_tokens( array $source, array $target, $kind ) {
+        if ( $source === $target ) return;
+        $first = 0;
+        while ( isset( $source[$first], $target[$first] ) && $source[$first] === $target[$first] ) $first++;
+        // Store structural diagnostics only, never source/response text or URL parameters.
+        $this->translation_failure( 'protected_term', sprintf(
+            'Translation changed protected tokens: kind=%s; source_count=%d; target_count=%d; first_mismatch=%d. No result was accepted.',
+            $kind, count( $source ), count( $target ), $first + 1
+        ) );
     }
 
     private function call_api( $system_instruction, $user_text, $max_tokens, $retries ) {

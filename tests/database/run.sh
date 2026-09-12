@@ -23,6 +23,7 @@ run_scenario() {
 }
 
 php "$ROOT/preflight.php"
+php "$ROOT/../test-format-quality.php"
 php "$ROOT/empty-database-preflight.php"
 run_scenario php "$ROOT/upgrade.php"
 run_scenario php "$ROOT/request-context.php" ajax

@@ -28,6 +28,23 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.9 Percentage Validation Correction
+
+Numeric prose percentages such as `95% or 100%` no longer become printf space-flag
+arguments. Percentage values and counts are checked separately, allowing decimal
+comma and whitespace localization. Real printf argument order, precision,
+numbered arguments, escaped percent, links, placeholders and dimensions remain
+protected. Numeric-percent context followed by whitespace/punctuation is treated
+as prose; adjacent directives such as `5%s` remain format arguments.
+
+Protected-token errors record the kind, source/target token counts and the first
+mismatch position, not source text, candidate text or URL query parameters.
+Existing stored failures are not rewritten or retried on upgrade. No queue,
+publication, translation-memory, provider, schema or cache-policy change.
+
+Offline format fixtures plus both Gemini/DeepSeek mock-provider paths are covered.
+Production retries and real-provider quality acceptance remain separate gates.
+
 ## 0.9.8 Page Workflow Candidate
 
 Page/resource x language, not whole-language totals, owns SEO readiness. Default

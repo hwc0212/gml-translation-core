@@ -46,6 +46,9 @@ function budget_fixture( $engine, $mode, array $texts, $type = 'text' ) {
         if ( $mode === 'format_order' ) $output = 'Anzahl %d Name %s';
         if ( $mode === 'format_precision' ) $output = 'Wert %0.2f';
         if ( $mode === 'format_numbered' ) $output = 'Anzahl %2$d Name %1$s %%';
+        if ( $mode === 'percentage' ) $output = '95 % oder 100 % Farbentfernung. Wert %s.';
+        if ( $mode === 'percentage_changed' ) $output = '90 % oder 100 % Farbentfernung. Wert %s.';
+        if ( $mode === 'percentage_placeholder' ) $output = '95 % oder 100 % Farbentfernung. Wert %d.';
         if ( $mode === 'limit_timeout' && count( $requests ) > 1 ) return new WP_Error( 'timeout', 'fixture timeout' );
         if ( $mode === 'timeout' ) return new WP_Error( 'timeout', 'fixture timeout' );
         if ( $mode === 'malformed' ) return [ 'response' => [ 'code' => 200 ], 'headers' => [], 'body' => '{' ];
@@ -111,6 +114,16 @@ foreach ( [ 'gemini', 'deepseek' ] as $engine ) {
     }
     list( $result ) = budget_fixture( $engine, 'format_numbered', [ 'Name %1$s count %2$d %%' ] );
     gml_db_assert( count( $result ?? [] ) === 1, "$engine allows numbered argument reordering and literal percent" );
+    list( $result, $requests ) = budget_fixture( $engine, 'percentage', [ '95% or 100% color removal. Value %s.' ] );
+    gml_db_assert( count( $result ?? [] ) === 1 && count( $requests ) === 1, "$engine accepts prose percentages in one request" );
+    foreach ( [ 'percentage_changed' => 'percentage', 'percentage_placeholder' => 'format_ordered' ] as $mode => $kind ) {
+        list( $result, $requests, $error ) = budget_fixture( $engine, $mode, [ '95% or 100% color removal. Value %s.' ] );
+        gml_db_assert( $result === null && count($requests) === 1 && $error['code'] === 'protected_term', "$engine invalid result rejected without provider retries" );
+        $stored = GML_Translation_Error::stored_message($error);
+        $position = $kind === 'percentage' ? 2 : 1;
+        gml_db_assert( strpos($stored, 'kind=' . $kind) !== false && strpos($stored, 'first_mismatch=' . $position) !== false, "$engine persists safe structural diagnostics" );
+        gml_db_assert( strpos($stored, 'color removal') === false && strpos($stored, '95%') === false, "$engine diagnostic excludes source and candidate content" );
+    }
 }
 gml_db_assert( budget_tm_digest() === $tm_before, 'all provider trials, including truncation, leave TM byte-for-byte unchanged' );
 gml_db_assert( GML_Translation_Budget::gemini_thinking( 'gemini-unknown' ) === [], 'unknown Gemini model gets no invented thinking setting' );
