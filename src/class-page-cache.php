@@ -92,9 +92,9 @@ class GML_Page_Cache {
     }
 
     /** Bounded maintenance plan. Unresolved legacy URLs remain pending, never guessed. */
-    public static function pending_clusters( $limit = 20 ) {
+    public static function pending_clusters( $limit = 20, $worker = false ) {
         global $wpdb;
-        if ( ! current_user_can( 'manage_options' ) ) return [];
+        if ( ! current_user_can( 'manage_options' ) && ! ( $worker && wp_doing_cron() ) ) return [];
         $table = GML_Resource_Manifest_Store::manifest_table();
         $rows = $wpdb->get_results( $wpdb->prepare(
             "SELECT d.option_name,d.option_value AS token,m.id,m.resource_key,m.source_url_hash,u.option_value AS urls
@@ -120,9 +120,9 @@ class GML_Page_Cache {
     }
 
     /** Call only after every exact URL succeeded at every configured external layer. */
-    public static function acknowledge_cluster( $name, $token ) {
+    public static function acknowledge_cluster( $name, $token, $worker = false ) {
         global $wpdb;
-        if ( ! current_user_can( 'manage_options' ) || ! preg_match( '/^' . self::CLUSTER_PREFIX . '[1-9][0-9]*$/D', $name ) || ! wp_is_uuid( $token ) ) return false;
+        if ( ( ! current_user_can( 'manage_options' ) && ! ( $worker && wp_doing_cron() ) ) || ! preg_match( '/^' . self::CLUSTER_PREFIX . '[1-9][0-9]*$/D', $name ) || ! wp_is_uuid( $token ) ) return false;
         return 1 === $wpdb->query( $wpdb->prepare(
             "DELETE FROM {$wpdb->options} WHERE option_name=%s AND option_value=%s", $name, $token
         ) );

@@ -16,6 +16,7 @@ require_once __DIR__ . '/class-translation-queue-scope.php';
 require_once __DIR__ . '/class-translation-error.php';
 require_once __DIR__ . '/class-translation-text.php';
 require_once __DIR__ . '/class-atomic-option-lock.php';
+require_once __DIR__ . '/class-translation-activity.php';
 
 abstract class GML_Translation_Queue_Processor {
 
@@ -50,21 +51,23 @@ abstract class GML_Translation_Queue_Processor {
     }
 
     public function maybe_schedule_cron() {
-        if ( ! is_admin() && ! ( defined( 'DOING_CRON' ) && DOING_CRON ) ) {
+        if ( class_exists('GML_Manual_Translation') && GML_Manual_Translation::pending_id()
+            && $this->ai_translation_available() && !static::circuit_is_open() ) {
+            static::ensure_scheduled();
             return;
         }
         if (
             ! $this->translation_work_enabled() ||
             ! $this->ai_translation_available() ||
             ! GML_Translation_Queue_Scope::has_work_scope() ||
-            static::circuit_is_open() ||
-            static::maybe_open_for_existing_failures()
+            static::circuit_is_open()
         ) {
-            static::unschedule_cron();
+            if ( is_admin() || ( defined( 'DOING_CRON' ) && DOING_CRON ) ) static::unschedule_cron();
             return;
         }
         if ( ! wp_next_scheduled( static::CRON_HOOK ) ) {
-            static::ensure_scheduled();
+            $ok = static::ensure_scheduled();
+            GML_Translation_Activity::record( $ok ? 'schedule_repaired' : 'schedule_failed' );
         }
     }
 
@@ -104,22 +107,23 @@ abstract class GML_Translation_Queue_Processor {
     }
 
     public function process_batch() {
+        $manual_id = class_exists('GML_Manual_Translation') ? GML_Manual_Translation::pending_id() : 0;
+        if ($manual_id && !GML_Translation_State::multilingual_enabled()) return;
         if (
-            get_option( 'gml_translation_paused', false ) ||
-            ! $this->translation_work_enabled() ||
+            ( ! $manual_id && get_option( 'gml_translation_paused', false ) ) ||
+            ( ! $manual_id && ! $this->translation_work_enabled() ) ||
             ! $this->ai_translation_available() ||
             static::circuit_is_open() ||
-            static::backoff_is_active() ||
-            static::maybe_open_for_existing_failures()
+            static::backoff_is_active()
         ) {
             return;
         }
 
         global $wpdb;
         $queue_table = $wpdb->prefix . 'gml_queue';
-        $sample_ids  = static::sample_ids();
-        if ( get_option( static::SAMPLE_OPTION, [] ) && ! $sample_ids ) return;
-        if ( ! GML_Translation_Queue_Scope::has_work_scope() ) {
+        $sample_ids  = $manual_id ? [] : static::sample_ids();
+        if ( ! $manual_id && get_option( static::SAMPLE_OPTION, [] ) && ! $sample_ids ) return;
+        if ( ! $manual_id && ! GML_Translation_Queue_Scope::has_work_scope() ) {
             static::unschedule_cron();
             return;
         }
@@ -132,6 +136,15 @@ abstract class GML_Translation_Queue_Processor {
         try {
             // Only the current lease owner may recover work left by a crashed worker.
             if ( ! static::recover_processing_rows( $lock_token, $wpdb, $queue_table ) ) return;
+            if ( $manual_id ) {
+                $snapshot=GML_Manual_Translation::snapshot($manual_id);
+                $job=GML_Manual_Translation::job();
+                if (!$snapshot || !hash_equals((string)($job['snapshot']??''),GML_Manual_Translation::token($snapshot))
+                    || !in_array($snapshot['queue']['target_lang'],GML_Language_Utils::enabled_local_target_codes(),true)) {
+                    GML_Manual_Translation::set_state($manual_id,'failed',['error'=>'source_conflict']);
+                    return;
+                }
+            }
 
             $normal_languages = GML_Translation_Queue_Scope::normal_languages();
             $enabled_languages = GML_Translation_Queue_Scope::enabled_languages();
@@ -150,6 +163,7 @@ abstract class GML_Translation_Queue_Processor {
                 $placeholders = implode( ',', array_fill( 0, count( $enabled_languages ), '%s' ) );
                 $scopes[] = '(' . $wpdb->prepare( "target_lang IN ($placeholders)", $enabled_languages ) . ' AND id IN (' . implode( ',', $sample_ids ) . '))';
             }
+            if ( $manual_id ) $scopes = [ 'id=' . (int)$manual_id ];
             if ( ! $scopes ) return;
             $scope_sql = ' AND (' . implode( ' OR ', $scopes ) . ')';
             $limit      = (int) static::BATCH_SIZE;
@@ -165,6 +179,10 @@ abstract class GML_Translation_Queue_Processor {
                 : [];
             if ( ! $items ) {
                 $items = $wpdb->get_results( $query . $order );
+            }
+            if ( class_exists('GML_Page_Work_Scheduler') && ! $sample_ids && ! $manual_id ) {
+                $page_items = GML_Page_Work_Scheduler::select_items($scope_sql, $limit);
+                if ( $page_items !== null ) $items = $page_items;
             }
 
             if ( empty( $items ) ) {
@@ -211,6 +229,7 @@ abstract class GML_Translation_Queue_Processor {
             $wpdb->query( "UPDATE $queue_table SET status = 'processing' WHERE id IN (" . implode( ',', $ids ) . ')' );
 
             $api        = $this->create_api();
+            if ($manual_id) GML_Manual_Translation::set_state($manual_id,'generating');
             $translator = $this->create_translator();
             $parser     = $this->create_parser();
             $saved      = false;
@@ -255,6 +274,7 @@ abstract class GML_Translation_Queue_Processor {
             } catch ( Throwable $exception ) {
                 if ( ! static::renew_process_lock( $lock_token ) ) return;
                 $diagnostic = static::provider_failure( $api, $exception->getMessage() );
+                static::record_provider_failure( $api, $diagnostic, $target, count( $items ) );
                 if ( $diagnostic['code'] === 'output_limit' ) {
                     // The provider client has already exhausted its bounded recovery.
                     // Never repeat the same request via fallback or the next cron tick.
@@ -295,6 +315,7 @@ abstract class GML_Translation_Queue_Processor {
                     } catch ( Throwable $single_exception ) {
                         if ( ! static::renew_process_lock( $lock_token ) ) return;
                         $diagnostic = static::provider_failure( $api, $single_exception->getMessage() );
+                        static::record_provider_failure( $api, $diagnostic, $target, 1 );
                         if ( $diagnostic['category'] === 'transient' ) {
                             $this->release_processing_items( $wpdb, $queue_table, $ids );
                             static::register_backoff( $diagnostic, $api );
@@ -347,9 +368,31 @@ abstract class GML_Translation_Queue_Processor {
                 }
             }
         } finally {
+            if ($manual_id && GML_Manual_Translation::pending_id()===$manual_id) {
+                $row=$wpdb->get_row($wpdb->prepare("SELECT status,error_message FROM $queue_table WHERE id=%d",$manual_id));
+                $terminal=$row && $row->status==='failed';
+                GML_Manual_Translation::set_state($manual_id,$terminal?'failed':'waiting',['error'=>$row->error_message??'']);
+                if(!$terminal) static::ensure_scheduled();
+            }
             if ( isset( $activity ) && GML_Atomic_Option_Lock::is_owner( static::LOCK_OPTION, $lock_token ) ) {
                 $activity['finished'] = time();
                 update_option( 'gml_translation_last_batch', $activity, false );
+                $metrics = isset( $api ) && method_exists( $api, 'get_request_metrics' ) ? $api->get_request_metrics() : [];
+                $context = [ 'language' => $activity['language'], 'items' => count( $ids ?? [] ), 'calls' => count( $metrics ) ];
+                if ( isset( $api ) ) {
+                    $context['engine'] = method_exists( $api, 'get_engine' ) ? $api->get_engine() : '';
+                    $context['model'] = method_exists( $api, 'get_model' ) ? $api->get_model() : '';
+                }
+                foreach ( [ 'input_tokens', 'output_tokens', 'latency_ms' ] as $field ) {
+                    $numbers = array_column( $metrics, $field );
+                    if ( array_filter( $numbers, 'is_numeric' ) ) $context[$field] = array_sum( $numbers );
+                }
+                if ( $metrics ) {
+                    $last_metric = end( $metrics );
+                    $context['finish_reason'] = $last_metric['finish_reason'] ?? '';
+                    $context['max_output_tokens'] = $last_metric['max_output_tokens'] ?? 0;
+                }
+                GML_Translation_Activity::record( 'batch_finished', $context );
             }
             static::release_process_lock( $lock_token );
             // Replace legacy single events after a batch, without waking a paused queue.
@@ -417,17 +460,27 @@ abstract class GML_Translation_Queue_Processor {
             return false;
         }
         try {
-            $saved = $translator->save_to_index(
-                $item->source_hash,
-                $item->source_text,
-                $translated,
-                $item->source_lang,
-                $item->target_lang,
-                $item->context_type,
-                'auto'
-            );
+            $manual = class_exists('GML_Manual_Translation') && GML_Manual_Translation::pending_id()===(int)$item->id;
+            if ($manual) {
+                $saved = GML_Manual_Translation::accept_result($item,$translated);
+            } else {
+                $ledger = GML_Translation_Memory::insert_missing_batch([[
+                    'source_hash'=>$item->source_hash,'source_text'=>$item->source_text,
+                    'source_lang'=>$item->source_lang,'target_lang'=>$item->target_lang,
+                    'translated_text'=>$translated,'context_type'=>$item->context_type,'status'=>'auto',
+                ]]);
+                $saved = is_array($ledger) && !empty($ledger['committed']);
+                if ($saved && !empty($ledger['skipped']) && ($ledger['items'][0]['existing_status']??'')==='pending') {
+                    $this->fail_or_retry_item($wpdb,$table,$item,'Existing translation is held; explicit review is required.',['code'=>'quality_hold']);
+                    return false;
+                }
+            }
             if ( $saved !== true ) {
                 throw new RuntimeException( 'Translation index write failed' );
+            }
+            if ($manual && (GML_Manual_Translation::job()['state']??'')==='candidate') {
+                $wpdb->update($table,['status'=>'failed','attempts'=>3,'error_message'=>'[candidate_ready] Candidate requires explicit review.','processed_at'=>current_time('mysql')],['id'=>(int)$item->id]);
+                return true;
             }
             if ( false === $wpdb->update( $table, [
                 'status'       => 'completed',
@@ -455,6 +508,12 @@ abstract class GML_Translation_Queue_Processor {
             'error_message' => GML_Translation_Error::stored_message( $error, $message ),
             'processed_at'  => current_time( 'mysql' ),
         ], [ 'id' => $item->id ] );
+        $failure = GML_Translation_Error::classify( $error, $message );
+        GML_Translation_Activity::record( 'item_error', $failure + [
+            'queue_id' => (int) $item->id, 'source_hash' => $item->source_hash,
+            'language' => $item->target_lang, 'context' => $item->context_type,
+            'attempts' => $attempts,
+        ] );
         if ( $updated === false && ( $error['code'] ?? '' ) === 'output_limit' ) {
             // Cron has no administrator; the internal circuit performs the pause.
             static::open_circuit( 'Local terminal failure could not be saved; translation remains paused.' );
@@ -549,6 +608,8 @@ abstract class GML_Translation_Queue_Processor {
             'model'     => sanitize_text_field( $context['model'] ?? '' ),
         ], false );
         update_option( 'gml_translation_paused', true, false );
+        update_option( 'gml_translation_pause_reason', [ 'code' => 'provider_configuration', 'at' => time() ], false );
+        GML_Translation_Activity::record( 'provider_paused', $context + $failure );
         // Keep the retry IDs isolated after an error; normal Start All must not absorb them.
         update_option( GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION, 1, false );
         static::clear_readiness_cache();
@@ -563,20 +624,15 @@ abstract class GML_Translation_Queue_Processor {
             'count' => static::failed_count(),
             'at'    => current_time( 'mysql' ),
         ], false );
-        update_option( 'gml_translation_paused', true, false );
+        // A successful connection test neither stops running work nor resumes a pause.
+        GML_Translation_Activity::record( 'connection_verified', [ 'actor' => get_current_user_id() ] );
         static::clear_readiness_cache();
         return $cleared;
     }
 
     public static function maybe_open_for_existing_failures() {
-        if ( static::circuit_is_open() ) return true;
-        $counts = static::get_actionable_failure_counts();
-        if ( $counts['new'] < static::LEGACY_FAILURE_THRESHOLD ) return false;
-        static::open_circuit( sprintf(
-            __( 'Translation paused for safety: %d failed items require provider verification and a limited retry sample.', static::TEXT_DOMAIN ),
-            $counts['new']
-        ) );
-        return true;
+        // Kept for old adapters. Stored/content failures do not prove a live outage.
+        return static::circuit_is_open();
     }
 
     private static function failed_count() {
@@ -747,6 +803,15 @@ abstract class GML_Translation_Queue_Processor {
             'engine' => is_object( $provider ) && method_exists( $provider, 'get_engine' ) ? sanitize_key( $provider->get_engine() ) : '',
             'model' => is_object( $provider ) && method_exists( $provider, 'get_model' ) ? sanitize_text_field( $provider->get_model() ) : '',
         ], false );
+        GML_Translation_Activity::record( 'provider_waiting', static::get_backoff() + $failure );
+    }
+
+    private static function record_provider_failure( $provider, array $failure, $language, $items ) {
+        GML_Translation_Activity::record( 'provider_error', $failure + [
+            'language' => $language, 'items' => $items,
+            'engine' => method_exists( $provider, 'get_engine' ) ? $provider->get_engine() : '',
+            'model' => method_exists( $provider, 'get_model' ) ? $provider->get_model() : '',
+        ] );
     }
 
     private static function clear_backoff() {

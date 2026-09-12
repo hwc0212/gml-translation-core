@@ -25,7 +25,9 @@ if ( $mode === 'activate' ) {
 } elseif ( $mode === 'frontend' ) {
     gml_lifecycle_assert( is_plugin_active( $file ) && class_exists( 'GML_Installer' ), 'plugin loaded through WordPress active_plugins lifecycle' );
     gml_lifecycle_assert( get_option( 'gml_db_version' ) === '2.4.0', 'active plugin visitor bootstrap leaves legacy database version untouched' );
-    gml_lifecycle_assert( ! preg_grep( '/(?:ALTER |CREATE |DELETE .*gml_(?:queue|index))/i', array_column( $wpdb->queries, 0 ) ), 'real visitor lifecycle contains no translation migration DDL or cleanup' );
+    gml_lifecycle_assert( defined('SAVEQUERIES') && SAVEQUERIES, 'visitor SQL tracing remains enabled' );
+    // A persistent-cache hit can execute no SQL, leaving wpdb::queries null.
+    gml_lifecycle_assert( ! preg_grep( '/(?:ALTER |CREATE |DELETE .*gml_(?:queue|index))/i', array_column( (array)$wpdb->queries, 0 ) ), 'real visitor lifecycle contains no translation migration DDL or cleanup' );
 } elseif ( $mode === 'deactivate' ) {
     deactivate_plugins( $file );
     gml_lifecycle_assert( ! is_plugin_active( $file ), 'plugin deactivates without deleting translations' );

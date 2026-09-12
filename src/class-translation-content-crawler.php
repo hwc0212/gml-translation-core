@@ -204,6 +204,7 @@ class GML_Translation_Content_Crawler {
 			}
 		}
 		delete_option( 'gml_crawl_offset' );
+        update_option('gml_crawl_priority_ids',class_exists('GML_Page_Work_Scheduler')?GML_Page_Work_Scheduler::important_post_ids():[],false);
 		delete_option( 'gml_crawl_completed' );
 		update_option( 'gml_crawl_total', $total, false );
 		if ( ! static::update_runtime_option( 'gml_crawl_running', true ) ) {
@@ -292,7 +293,18 @@ class GML_Translation_Content_Crawler {
 		$offset     = max( 0, (int) get_option( 'gml_crawl_offset', 0 ) );
 		$post_types = get_post_types( [ 'public' => true ], 'names' );
 		unset( $post_types['attachment'] );
+        $priority_ids=array_values(array_filter(array_map('absint',(array)get_option('gml_crawl_priority_ids',[]))));
+        $priority_order=static function($orderby,$query) use($priority_ids) {
+            if(!$priority_ids || !$query->get('gml_crawl_order')) return $orderby;
+            global $wpdb;
+            $ids=implode(',',$priority_ids);
+            return "CASE WHEN {$wpdb->posts}.ID IN ($ids) THEN 0 ELSE 1 END,FIELD({$wpdb->posts}.ID,$ids),{$wpdb->posts}.ID ASC";
+        };
+        add_filter('posts_orderby',$priority_order,10,2);
+        try {
 		$posts = get_posts( [
+            'suppress_filters'=>false,
+            'gml_crawl_order'=>true,
 			'post_type'      => array_values( $post_types ),
 			'post_status'    => 'publish',
 			'posts_per_page' => static::BATCH_SIZE,
@@ -301,6 +313,7 @@ class GML_Translation_Content_Crawler {
 			'order'          => 'ASC',
 			'no_found_rows'  => true,
 		] );
+        } finally { remove_filter('posts_orderby',$priority_order,10); }
 
 		if ( empty( $posts ) ) {
 			static::stop_crawl( true );

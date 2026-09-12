@@ -2,6 +2,7 @@
 /** Shared administration commands; scanning never controls the AI worker. */
 if ( ! defined( 'ABSPATH' ) ) exit;
 require_once __DIR__ . '/class-translation-queue-scope.php';
+require_once __DIR__ . '/class-translation-activity.php';
 
 class GML_Translation_Controls {
     public static function handle_request( array $post ) {
@@ -34,7 +35,7 @@ class GML_Translation_Controls {
         if ( ! GML_Translation_State::multilingual_enabled() || ! GML_Translation_State::ai_available() ) {
             return new WP_Error( 'ai_unavailable', 'Enable the multilingual site and configure AI Translation first.' );
         }
-        if ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() ) {
+        if ( GML_Queue_Processor::circuit_is_open() ) {
             return new WP_Error( 'safety_pause', 'Translation is safety-paused. Test the saved AI connection and retry a limited language sample first.' );
         }
         $languages = (array) get_option( 'gml_languages', [] );
@@ -58,6 +59,8 @@ class GML_Translation_Controls {
         update_option( GML_Translation_Queue_Scope::NORMAL_OPTION, 1, false );
         update_option( 'gml_languages', $languages );
         update_option( 'gml_translation_paused', false, false );
+        delete_option( 'gml_translation_pause_reason' );
+        GML_Translation_Activity::record( 'queue_resumed', [ 'language' => $lang, 'actor' => get_current_user_id() ] );
         return true;
     }
 
@@ -94,7 +97,7 @@ class GML_Translation_Controls {
         if ( ! GML_Translation_State::multilingual_enabled() || ! GML_Translation_State::ai_available() ) {
             return new WP_Error( 'ai_unavailable', 'Enable the multilingual site and configure AI Translation first.' );
         }
-        if ( GML_Queue_Processor::circuit_is_open() || GML_Queue_Processor::maybe_open_for_existing_failures() ) {
+        if ( GML_Queue_Processor::circuit_is_open() ) {
             return new WP_Error( 'safety_pause', 'Translation is safety-paused. Test the saved AI connection and retry a limited language sample first.' );
         }
         $sample = self::sample_status();
@@ -112,6 +115,8 @@ class GML_Translation_Controls {
         update_option( GML_Translation_Queue_Scope::NORMAL_OPTION, (int) ( ! get_option( 'gml_translation_paused', false ) && GML_Translation_Queue_Scope::normal_enabled() ), false );
         update_option( GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION, 0, false );
         update_option( 'gml_translation_paused', false, false );
+        delete_option( 'gml_translation_pause_reason' );
+        GML_Translation_Activity::record( 'sample_resumed', [ 'language' => $sample['language'], 'items' => $sample['remaining'], 'actor' => get_current_user_id() ] );
         return true;
     }
 
@@ -122,11 +127,14 @@ class GML_Translation_Controls {
         return true;
     }
 
-    public static function pause( $lang = '' ) {
+    public static function pause( $lang = '', $reason = 'manual_pause' ) {
         if ( ! current_user_can( 'manage_options' ) ) return new WP_Error( 'forbidden', 'Unauthorized' );
         if ( $lang === '' ) {
             update_option( GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION, 1, false );
             update_option( 'gml_translation_paused', true, false );
+            $reason = in_array( $reason, [ 'manual_pause', 'credentials_changed' ], true ) ? $reason : 'manual_pause';
+            update_option( 'gml_translation_pause_reason', [ 'code' => $reason, 'at' => time(), 'actor' => get_current_user_id() ], false );
+            GML_Translation_Activity::record( 'queue_paused', [ 'code' => $reason, 'actor' => get_current_user_id() ] );
             GML_Queue_Processor::unschedule_cron();
             return true;
         }
@@ -138,6 +146,7 @@ class GML_Translation_Controls {
                 }
                 $language['paused'] = true;
                 update_option( 'gml_languages', $languages );
+                GML_Translation_Activity::record( 'language_paused', [ 'language' => $lang, 'actor' => get_current_user_id() ] );
                 if ( ! GML_Translation_Queue_Scope::has_work_scope() ) GML_Queue_Processor::unschedule_cron();
                 return true;
             }
@@ -184,6 +193,8 @@ class GML_Translation_Controls {
         elseif ( $next < time() - 120 ) $state = 'overdue';
         else $state = 'scheduled';
         $backoff = GML_Queue_Processor::get_backoff();
-        return [ 'state' => $state, 'last_activity' => (int) ( $last['finished'] ?? $last['started'] ?? 0 ), 'next_run' => $next ?: 0, 'retry_after' => (int) ( $backoff['until'] ?? 0 ) ];
+        $pause = (array) get_option( 'gml_translation_pause_reason', [] );
+        $reason = get_option( 'gml_translation_paused', false ) ? ( $pause['code'] ?? 'legacy_pause' ) : ( $runnable ? '' : 'language_paused' );
+        return [ 'state' => $state, 'reason' => $reason, 'paused_at' => (int) ( $pause['at'] ?? 0 ), 'last_activity' => (int) ( $last['finished'] ?? $last['started'] ?? 0 ), 'next_run' => $next ?: 0, 'retry_after' => (int) ( $backoff['until'] ?? 0 ) ];
     }
 }

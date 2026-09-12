@@ -10,7 +10,7 @@ final class GML_Translation_Memory {
      * Conflicts are per tuple; DB/invalidation errors roll back the entire batch
      * and return false. A returned ledger describes committed outcomes only.
      */
-    public static function insert_missing_batch( array $records ) {
+    public static function insert_missing_batch( array $records, $guard = null ) {
         global $wpdb;
         if ( count( $records ) > self::BATCH_SIZE ) return false;
         $normalized = [];
@@ -42,7 +42,8 @@ final class GML_Translation_Memory {
         ksort( $normalized ); // Consistent lock order for overlapping batches.
         $changes = [];
         $outcomes = [];
-        $mutate = static function() use ( $wpdb, $table, $normalized, &$changes, &$outcomes ) {
+        $mutate = static function() use ( $wpdb, $table, $normalized, &$changes, &$outcomes, $guard ) {
+            if ( $guard !== null && ( ! is_callable($guard) || call_user_func($guard) !== true ) ) return false;
             $now = current_time( 'mysql' );
             foreach ( $normalized as $key => $record ) {
                 // The unique index resolves the race atomically. Do not use
@@ -219,6 +220,36 @@ final class GML_Translation_Memory {
         return class_exists( 'GML_Resource_Readiness' )
             ? false !== GML_Resource_Readiness::apply_translation_changes( [ [ 'source_hash' => $row->source_hash, 'target_lang' => $row->target_lang ] ], $mutate )
             : false !== $mutate();
+    }
+
+    public static function edit_snapshot($id) {
+        global $wpdb;
+        return $wpdb->get_row($wpdb->prepare("SELECT * FROM {$wpdb->prefix}gml_index WHERE id=%d",(int)$id),ARRAY_A);
+    }
+
+    public static function edit_token(array $row) {
+        return hash('sha256',wp_json_encode($row));
+    }
+
+    /** Human edits explicitly compare the full original row, including held status. */
+    public static function update_reviewed($id,$text,$expected,$release_hold=false,$guard=null) {
+        global $wpdb;
+        if(!current_user_can('manage_options') || !GML_Resource_Approval::transaction_health(true)['ready']) return false;
+        $row=self::edit_snapshot($id);
+        if(!$row || !hash_equals(self::edit_token($row),(string)$expected)) return false;
+        if($row['status']==='pending' && !$release_hold) return false;
+        $text=GML_Translation_Text::plain_text($text);
+        if(trim($text)==='' || strlen($text)>100000 || GML_Translation_Text::obvious_contamination($row['source_text'],$text)) return false;
+        $mutation=static function() use($wpdb,$id,$text,$expected,$guard) {
+            if($guard!==null && call_user_func($guard)!==true) return false;
+            $table=$wpdb->prefix.'gml_index';
+            $current=$wpdb->get_row($wpdb->prepare("SELECT * FROM $table WHERE id=%d FOR UPDATE",(int)$id),ARRAY_A);
+            if(!$current || !hash_equals(self::edit_token($current),(string)$expected)) return false;
+            return false!==$wpdb->update($table,['translated_text'=>$text,'status'=>'manual','updated_at'=>current_time('mysql')],['id'=>(int)$id]);
+        };
+        $saved=GML_Resource_Readiness::apply_translation_change($row['source_hash'],$row['target_lang'],$mutation);
+        if($saved!==false && class_exists('GML_Translator')) GML_Translator::invalidate_cache($row['source_lang'],$row['target_lang']);
+        return $saved!==false;
     }
 
     public static function delete_by_id( $id ) {

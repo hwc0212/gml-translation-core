@@ -16,7 +16,12 @@ define( 'LOGGED_IN_KEY', 'gml-disposable-test-login' );
 define( 'NONCE_KEY', 'gml-disposable-test-nonce' );
 define( 'DISABLE_WP_CRON', true );
 define( 'WP_HTTP_BLOCK_EXTERNAL', true );
-define( 'SAVEQUERIES', true );
+if ( ! defined('SAVEQUERIES') ) define( 'SAVEQUERIES', true );
+if ( getenv('GML_TEST_REDIS_HOST') ) {
+    define('WP_REDIS_HOST',getenv('GML_TEST_REDIS_HOST'));
+    define('WP_REDIS_CLIENT','phpredis');
+    define('WP_REDIS_PREFIX','gml-disposable-regression:');
+}
 define( 'WP_DEBUG', true );
 define( 'WP_DEBUG_DISPLAY', false );
 define( 'WP_HOME', getenv( 'GML_TEST_HOME' ) ?: 'http://gml-regression.test' );

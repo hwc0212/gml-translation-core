@@ -28,7 +28,38 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
-## 0.9.7 Progressive Publication
+## 0.9.8 Page Workflow Candidate
+
+Page/resource x language, not whole-language totals, owns SEO readiness. Default
+98% uses exact segment-count and source-byte coverage; missing critical title/meta,
+held content, stale snapshots and explicit review rejection cannot pass by rounding.
+This supersedes the 0.9.7 partial-SEO policy. Valid progressive routes remain a
+product-adapter concern and need not redirect to source when below threshold.
+
+The existing worker selects a bounded resource/language window, prioritizes manual
+requests, home/direct primary navigation, configured priorities and recent demand.
+Waiting age prevents permanent long-tail starvation. Explicit one-item work can
+run while background work is paused; hard AI-off, unavailable credentials, provider
+circuit and cooldown still apply. Existing TM receives a candidate, never an
+implicit overwrite. Manual edits use transaction-bound source/TM snapshots.
+
+Schema 3.5.0 only adds `gml_page_demand`, a daily aggregate table. Legacy tables,
+option keys, assets and routes are retained. Demand is opt-in, consent-controlled
+by the product adapter, rate-limited and never creates resources or calls AI.
+`gml_page_demand_scores` can merge existing aggregate analytics for known IDs.
+No new GSC/GA credentials or OAuth integration is introduced.
+
+The existing cache outbox has a Cron consumer with configured exact-URL adapters.
+It uses a token-bound cursor, at most 20 URLs/one resource per run, and checks the
+lease after each callback. Adapters must return true only after verification and
+must enforce their own request timeout (recommended <=10 seconds). Missing adapters
+remain visibly unconfirmed; no global cache purge is performed.
+
+Tests: database suite now requires 109 scenarios plus 11 exact-threshold cases;
+optional `GML_TEST_REDIS_HOST` enables a real PhpRedis-backed test drop-in. Product
+browser and release ZIP acceptance are separate from these database assertions.
+
+## 0.9.7 Progressive Publication (Historical)
 
 Machine completeness remains a diagnostic, not a universal publication threshold.
 Current resource manifests with effective saved translations can publish partial

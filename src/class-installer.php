@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '3.4.0';
+    const DB_VERSION = '3.5.0';
     const ERROR_OPTION = 'gml_translation_db_error';
 
     public static function register_hooks() {
@@ -97,6 +97,9 @@ class GML_Installer {
     }
 
     public static function deactivate() {
+        wp_clear_scheduled_hook('gml_resource_cache_consume');
+        wp_clear_scheduled_hook('gml_resource_cache_continue');
+        wp_clear_scheduled_hook('gml_page_demand_cleanup');
         wp_clear_scheduled_hook( 'gml_process_queue' );
         wp_clear_scheduled_hook( 'gml_crawl_content' );
         wp_clear_scheduled_hook( 'gml_resource_manifest_backfill' );
@@ -116,6 +119,15 @@ class GML_Installer {
     private static function create_tables() {
         global $wpdb;
         $cc = $wpdb->get_charset_collate();
+        $demand = $wpdb->prefix . 'gml_page_demand';
+        self::create_if_missing( $demand, "CREATE TABLE IF NOT EXISTS $demand (
+            resource_id BIGINT UNSIGNED NOT NULL,
+            language VARCHAR(10) NOT NULL,
+            day DATE NOT NULL,
+            views INT UNSIGNED NOT NULL DEFAULT 0,
+            PRIMARY KEY (resource_id,language,day),
+            KEY day (day)
+        ) ENGINE=InnoDB $cc;" );
 
         // Translation memory — global hash index
         $t = $wpdb->prefix . 'gml_index';

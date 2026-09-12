@@ -63,12 +63,13 @@ class GML_Translation_Editor_Core {
 
         $total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM $table $where" );
         $rows  = $wpdb->get_results(
-            "SELECT id, source_hash, source_text, translated_text, context_type, status, updated_at
+            "SELECT *
              FROM $table $where
              ORDER BY updated_at DESC
              LIMIT $per OFFSET $offset"
         );
 
+        foreach ((array)$rows as $row) $row->edit_snapshot=GML_Translation_Memory::edit_token((array)$row);
         wp_send_json_success( [
             'rows'       => $rows,
             'total'      => $total,
@@ -105,9 +106,10 @@ class GML_Translation_Editor_Core {
         }
         // Translation rows are plain text inserted into existing DOM text
         // nodes/attributes. Markup belongs to the source template.
-        $saved = GML_Translation_Memory::update_by_id( $id, $translated, 'manual' );
+        $expected=sanitize_text_field(wp_unslash($_POST['edit_snapshot']??''));
+        $saved = GML_Translation_Memory::update_reviewed( $id, $translated, $expected );
         if ( false === $saved ) {
-            wp_send_json_error( __( 'Translation could not be saved.', static::TEXT_DOMAIN ) );
+            wp_send_json_error( __( 'Translation changed or could not be saved. Refresh and review the current text.', static::TEXT_DOMAIN ) );
         }
 
         // A generation bump also invalidates Redis-backed page transients.
@@ -119,7 +121,7 @@ class GML_Translation_Editor_Core {
             GML_Translator::invalidate_cache( $row->source_lang, $row->target_lang );
         }
 
-        wp_send_json_success( [ 'message' => __( 'Translation saved.', static::TEXT_DOMAIN ) ] );
+        wp_send_json_success( [ 'message' => __( 'Translation saved.', static::TEXT_DOMAIN ), 'edit_snapshot'=>GML_Translation_Memory::edit_token(GML_Translation_Memory::edit_snapshot($id)) ] );
     }
 
     /**

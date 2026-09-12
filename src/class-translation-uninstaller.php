@@ -13,6 +13,7 @@ require_once __DIR__ . '/class-page-cache.php';
 final class GML_Translation_Uninstaller {
 
     const TABLE_SUFFIXES = [
+        'gml_page_demand',
         'gml_plan_items',
         'gml_plans',
         'gml_queue',
@@ -33,6 +34,8 @@ final class GML_Translation_Uninstaller {
         'gml_resource_manifest_dirty',
         'gml_resource_readiness_reverse',
         'gml_resource_readiness_rebuild',
+        'gml_resource_cache_consume',
+        'gml_page_demand_cleanup',
     ];
 
     /**

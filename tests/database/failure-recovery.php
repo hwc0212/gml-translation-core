@@ -61,6 +61,7 @@ class GML_Failure_Recovery_Provider {
 class GML_Failure_Recovery_Worker extends GML_Queue_Processor {
     public static $provider;
     protected function create_api() { return self::$provider; }
+    public static function get_actionable_failure_counts() { return [ 'total'=>1000, 'acknowledged'=>0, 'new'=>1000 ]; }
 }
 
 $provider = new GML_Failure_Recovery_Provider();
@@ -80,6 +81,12 @@ $wpdb->insert( $queue, [
 $queue_ids[] = (int) $wpdb->insert_id;
 GML_Translation_Controls::pause();
 gml_db_assert( GML_Translation_Controls::start( 'it' ) === true, 'transient test queue starts for one language' );
+gml_db_assert( ! GML_Failure_Recovery_Worker::maybe_open_for_existing_failures(), 'stored failure totals never create a provider circuit' );
+GML_Queue_Processor::clear_circuit_breaker();
+gml_db_assert( ! get_option( 'gml_translation_paused' ), 'successful connection verification does not pause running translation' );
+wp_clear_scheduled_hook( 'gml_process_queue' );
+$worker->maybe_schedule_cron();
+gml_db_assert( (bool) wp_next_scheduled( 'gml_process_queue' ), 'enabled pending work repairs a missing schedule without an admin-only dependency' );
 $worker->process_batch();
 $row = $wpdb->get_row( $wpdb->prepare( "SELECT status, attempts FROM $queue WHERE id=%d", end( $queue_ids ) ) );
 gml_db_assert( $row->status === 'pending' && (int) $row->attempts === 0, 'HTTP 429 returns work to pending without consuming item retries' );
@@ -97,6 +104,7 @@ $provider->mode = 'success';
 $worker->process_batch();
 gml_db_assert( $wpdb->get_var( $wpdb->prepare( "SELECT status FROM $queue WHERE id=%d", end( $queue_ids ) ) ) === 'completed', 'queue resumes after cooldown and saves the translation' );
 gml_db_assert( GML_Queue_Processor::get_backoff() === [], 'successful work clears provider cooldown state' );
+gml_db_assert( ! get_option( 'gml_translation_paused' ), 'one transient provider failure does not leave an indefinite global pause' );
 
 GML_Translation_Controls::pause();
 $text = 'Configuration failure ' . wp_generate_uuid4();
@@ -115,6 +123,7 @@ gml_db_assert( $row->status === 'pending' && (int) $row->attempts === 0, 'HTTP 4
 gml_db_assert( GML_Queue_Processor::circuit_is_open() && ( $circuit['code'] ?? '' ) === 'bad_request', 'HTTP 400 opens a classified configuration breaker' );
 gml_db_assert( get_option( 'gml_translation_paused' ) && ! wp_next_scheduled( 'gml_process_queue' ), 'configuration breaker pauses and unschedules AI work' );
 GML_Queue_Processor::clear_circuit_breaker();
+gml_db_assert( get_option( 'gml_translation_paused' ), 'verifying a paused provider never silently resumes paid translation' );
 
 $classified = GML_Translation_Error::classify( [ 'code' => 'bad_request', 'status' => 400 ], 'Google Gemini API HTTP 400: API key not valid. api_key=secret-value' );
 gml_db_assert( $classified['code'] === 'authentication_error' && $classified['category'] === 'configuration', 'invalid-key HTTP 400 receives an actionable authentication classification' );
@@ -161,6 +170,23 @@ $render->invoke( $admin );
 $failure_html = ob_get_clean();
 gml_db_assert( strpos( $failure_html, 'stored failed items' ) !== false && strpos( $failure_html, 'Review the 20 most recent failed items' ) !== false, 'admin queue renders historical failure status and bounded row details' );
 gml_db_assert( strpos( $failure_html, '<script>unsafe()</script>' ) === false, 'failed source previews are escaped and cannot inject admin HTML' );
+gml_db_assert( strpos( $failure_html, 'Translation Activity Log' ) !== false, 'bounded operational activity is visible to administrators' );
+$events = GML_Translation_Activity::recent(100);
+$event_names = array_column($events,'event');
+foreach ( ['queue_resumed','provider_error','provider_waiting','batch_finished','provider_paused','connection_verified'] as $event_name ) {
+    gml_db_assert( in_array($event_name,$event_names,true), 'activity log records ' . $event_name );
+}
+GML_Translation_Activity::record('test_metadata', ['engine'=>'gemini','model'=>'test-model','status'=>400,'source_text'=>'NEVER_LOG_SOURCE','message'=>'NEVER_LOG_RAW_RESPONSE','api_key'=>'NEVER_LOG_KEY']);
+$latest = GML_Translation_Activity::recent(1)[0];
+gml_db_assert( $latest['engine'] === 'gemini' && $latest['model'] === 'test-model', 'provider identity survives safe metadata logging' );
+gml_db_assert( $latest['status'] === 400 && strpos(wp_json_encode($latest),'NEVER_LOG') === false, 'activity retains useful metadata but never raw content or credentials' );
+for ($n=0;$n<105;$n++) GML_Translation_Activity::record('retention_test',['items'=>$n]);
+gml_db_assert( count(GML_Translation_Activity::recent(100)) === 100, 'activity retention is bounded to 100 records' );
+$log_count = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name LIKE %s",$wpdb->esc_like(GML_Translation_Activity::PREFIX).'%'));
+gml_db_assert( $log_count === 100, 'retention removes older event rows instead of growing indefinitely' );
+wp_set_current_user(0);
+gml_db_assert( GML_Translation_Activity::recent() === [], 'unauthorized visitors cannot read activity records' );
+wp_set_current_user(1);
 
 $resolved_id = $failure_ids[0];
 $resolved = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $queue WHERE id=%d", $resolved_id ) );

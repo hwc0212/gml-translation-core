@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test "${GML_DATABASE_TESTS:-}" = 1
 
 scenario_count=0
-expected_scenarios=107
+expected_scenarios=108
 run_scenario() {
     local output
     if ! output="$("$@" 2>&1)"; then
@@ -147,6 +147,10 @@ for home in http://gml-regression.test http://gml-regression.test/ygnaglul; do
     run_scenario php "$ROOT/routing.php" cleanup
 done
 
+run_scenario php "$ROOT/page-workflow.php"
+php "$ROOT/../test-page-readiness-policy.php"
+expected_scenarios=$((expected_scenarios + 1))
+run_scenario php "$ROOT/page-scheduling-cache.php"
 if [ -f "$GML_TEST_PRODUCT_DIR/tests/database/uninstall.php" ]; then
     expected_scenarios=$((expected_scenarios + 1))
     run_scenario php "$GML_TEST_PRODUCT_DIR/tests/database/uninstall.php"

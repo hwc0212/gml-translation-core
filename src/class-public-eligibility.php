@@ -1,6 +1,7 @@
 <?php
 /** Derived publication eligibility for exact resource translation snapshots. */
 if ( ! defined( 'ABSPATH' ) ) exit;
+require_once __DIR__ . '/class-page-readiness-policy.php';
 
 final class GML_Public_Eligibility {
     const BATCH_SIZE = 500;
@@ -46,7 +47,7 @@ final class GML_Public_Eligibility {
             ? GML_Resource_Approval::get_statuses_bulk( array_values( $resources ), $targets )
             : [];
         $indexable = self::indexability_map( $resources, $context );
-        $partial = self::partial_candidates( $review_statuses );
+        $page_readiness = GML_Page_Readiness_Policy::evaluate_bulk( $review_statuses );
         $clusters = [];
 
         foreach ( $resources as $key => $resource ) {
@@ -72,11 +73,12 @@ final class GML_Public_Eligibility {
                 $snapshot_matches = ! empty( $review['snapshot_matches'] );
                 $review_required = self::review_required( $resource, $lang, $context );
                 $current_rejection = $snapshot_matches && ( $review['decision'] ?? $human ) === 'rejected';
-                $partial_public = ! empty( $partial[ $key ][ $lang ] );
+                $page_policy = $page_readiness[ $key ][ $lang ] ?? [];
+                $partial_public = ! empty( $page_policy['ready'] );
                 $route = self::route( $resource, $lang, $source );
                 $public = $source_public
                     && $route['valid']
-                    && ( $machine === 'complete' || $partial_public )
+                    && $partial_public
                     && ! $current_rejection
                     && ( ! $review_required || ( $human === 'approved' && $snapshot_matches ) );
                 $reason = self::target_reason(
@@ -88,6 +90,7 @@ final class GML_Public_Eligibility {
                     $snapshot_matches,
                     $review_required
                 );
+                if ( ! $public && ! $partial_public && $source_public && $route['valid'] ) $reason = $page_policy['reason'] ?? $reason;
                 if ( $public && $machine !== 'complete' ) $reason = 'eligible_partial';
                 if ( $current_rejection ) $reason = 'rejected';
                 $languages[ $lang ] = self::status_row(
@@ -102,6 +105,7 @@ final class GML_Public_Eligibility {
                     $review_required,
                     $review
                 );
+                $languages[ $lang ]['page_readiness'] = $page_policy;
             }
 
             $eligible = [];

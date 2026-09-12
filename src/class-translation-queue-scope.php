@@ -54,6 +54,8 @@ class GML_Translation_Queue_Scope {
         delete_option( self::SAMPLE_PAUSED_OPTION );
         if ( ! self::normal_languages() ) {
             update_option( 'gml_translation_paused', true, false );
+            update_option( 'gml_translation_pause_reason', [ 'code' => 'sample_finished', 'at' => time() ], false );
+            if ( class_exists( 'GML_Translation_Activity' ) ) GML_Translation_Activity::record( 'sample_finished' );
             GML_Queue_Processor::unschedule_cron();
         }
     }

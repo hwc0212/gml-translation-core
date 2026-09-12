@@ -101,7 +101,7 @@ gml_db_assert( true === GML_Resource_Manifest_Store::save_complete( $resource, $
 $current_manifest = GML_Resource_Manifest_Store::get_by_key( $resource->get_key() );
 gml_db_assert( (int) $current_manifest->manifest_generation === (int) $legacy_manifest->manifest_generation + 1, 'redesign advances the resource manifest generation' );
 gml_db_assert( GML_Resource_Readiness::get_status( $resource, 'qr' ) === 'incomplete', 'new current strings make the translated route incomplete' );
-gml_db_assert( GML_Public_Eligibility::is_eligible( $resource, 'qr' ), 'a redesigned page with reusable current translations remains publishable while new strings are pending' );
+gml_db_assert( ! GML_Public_Eligibility::is_eligible( $resource, 'qr' ), 'redesigned page below page-local threshold stays out of SEO discovery while source fallback remains accessible' );
 $partial = $translator->translate( $current, 'qr' );
 foreach ( $added as $node ) gml_db_assert( !isset($partial['replacements'][$node['text']]), 'new source content is preserved instead of substituting obsolete translation' );
 
