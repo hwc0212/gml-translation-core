@@ -129,6 +129,16 @@ final class GML_Manual_Translation {
     }
     private static function resolve_queue_error($id) {
         global $wpdb;
-        $wpdb->update($wpdb->prefix.'gml_queue',['status'=>'completed','processed_at'=>current_time('mysql')],['id'=>(int)$id,'status'=>'failed']);
+        $row=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$wpdb->prefix}gml_queue WHERE id=%d",(int)$id));
+        if ($row) self::resolve_asset_failures($row);
+    }
+
+    /** Retain old errors and timestamps as history; never delete translation assets. */
+    public static function resolve_asset_failures($item) {
+        global $wpdb;
+        $valid=$wpdb->get_var($wpdb->prepare("SELECT id FROM {$wpdb->prefix}gml_index WHERE source_hash=%s AND source_lang=%s AND target_lang=%s AND status IN ('auto','manual') LIMIT 1",$item->source_hash,$item->source_lang,$item->target_lang));
+        if (!$valid) return false;
+        return $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}gml_queue SET status='completed' WHERE status='failed' AND source_hash=%s AND source_lang=%s AND target_lang=%s AND context_type=%s AND BINARY source_text=BINARY %s",
+            $item->source_hash,$item->source_lang,$item->target_lang,$item->context_type,$item->source_text));
     }
 }

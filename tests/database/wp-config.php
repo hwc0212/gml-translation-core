@@ -20,7 +20,7 @@ if ( ! defined('SAVEQUERIES') ) define( 'SAVEQUERIES', true );
 if ( getenv('GML_TEST_REDIS_HOST') ) {
     define('WP_REDIS_HOST',getenv('GML_TEST_REDIS_HOST'));
     define('WP_REDIS_CLIENT','phpredis');
-    define('WP_REDIS_PREFIX','gml-disposable-regression:');
+    define('WP_REDIS_PREFIX','gml-disposable-regression:'.$database.':');
 }
 define( 'WP_DEBUG', true );
 define( 'WP_DEBUG_DISPLAY', false );

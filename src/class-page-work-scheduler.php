@@ -24,6 +24,7 @@ final class GML_Page_Work_Scheduler {
         $location = (string) get_option('gml_priority_menu_location', 'primary');
         $menu = $locations[$location] ?? 0;
         foreach ( $menu ? (array) wp_get_nav_menu_items($menu) : [] as $item ) {
+            if (!is_object($item) || !isset($item->url,$item->menu_item_parent)) continue;
             if ( (int) $item->menu_item_parent !== 0 ) continue;
             $resource = GML_Resource_Identity::resolve($item->url);
             if ( $resource && $resource->is_eligible() && ! isset($keys[$resource->get_key()]) ) $keys[$resource->get_key()] = 200;
@@ -71,17 +72,17 @@ final class GML_Page_Work_Scheduler {
         }
         unset($row);
         usort($rows,static function($a,$b) {
-            return ($b['score']<=>$a['score']) ?: ($a['pending']<=>$b['pending']) ?: ($a['language_order']<=>$b['language_order']) ?: strcmp($a['waiting_since'],$b['waiting_since']);
+            return ($b['score']<=>$a['score']) ?: strcmp($a['waiting_since'],$b['waiting_since']) ?: ($a['language_order']<=>$b['language_order']) ?: ($a['id']<=>$b['id']);
         });
         $chosen=$rows[0];
         if (($window['resource_id']??0)!=$chosen['id'] || ($window['lang']??'')!==$chosen['target_lang'] || ($window['until']??0)<=time()) {
-            update_option(self::WINDOW,['resource_id'=>(int)$chosen['id'],'lang'=>$chosen['target_lang'],'until'=>time()+180],false);
+            update_option(self::WINDOW,['resource_id'=>(int)$chosen['id'],'lang'=>$chosen['target_lang'],'until'=>time()+900],false);
         }
         return $wpdb->get_results($wpdb->prepare("SELECT q.* FROM $q q
             WHERE q.status='pending' AND q.attempts<3 AND q.target_lang=%s $scope_sql
             AND EXISTS(SELECT 1 FROM $s s INNER JOIN $m m ON m.id=s.resource_id AND m.manifest_generation=s.manifest_generation
                 WHERE s.source_hash=q.source_hash AND m.id=%d AND m.discovery_state='complete')
-            ORDER BY q.priority DESC,q.context_type,q.created_at,q.id LIMIT %d",
+            ORDER BY q.priority DESC,IF(q.context_type IN ('seo_title','seo_meta'),0,1),q.context_type,q.created_at,q.id LIMIT %d",
             $chosen['target_lang'],(int)$chosen['id'],min(30,max(1,(int)$limit))));
     }
 }

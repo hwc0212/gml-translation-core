@@ -31,6 +31,8 @@ foreach ( [ 'es', 'ru' ] as $lang ) {
     }
 }
 class GML_Fairness_Worker extends GML_Queue_Processor {
+    // Isolate selection fairness at a one-slice run boundary; continuation has its own test.
+    const RUN_BATCHES = 1;
     public static $languages = [];
     protected function create_api() {
         return new class {

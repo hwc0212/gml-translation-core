@@ -17,11 +17,22 @@ require_once __DIR__ . '/class-translation-error.php';
 require_once __DIR__ . '/class-translation-text.php';
 require_once __DIR__ . '/class-atomic-option-lock.php';
 require_once __DIR__ . '/class-translation-activity.php';
+require_once __DIR__ . '/class-translation-budget.php';
 
 abstract class GML_Translation_Queue_Processor {
 
     const TEXT_DOMAIN = 'gml-translate';
     const CRON_HOOK = 'gml_process_queue';
+    const CONTINUE_HOOK = 'gml_continue_queue';
+    const RUN_BATCHES = 8;
+    const RUN_SECONDS = 45;
+    private $slice = [];
+    private $run_id = '';
+    private $slice_token = '';
+    private $slice_manual = 0;
+    private $slice_language = '';
+    private $slice_scope = '';
+    private $due = [];
     const CIRCUIT_OPTION = 'gml_translation_circuit_breaker';
     const FAILURE_ACK_OPTION = 'gml_translation_failure_ack';
     const SAMPLE_OPTION = 'gml_translation_retry_sample_ids';
@@ -37,6 +48,8 @@ abstract class GML_Translation_Queue_Processor {
     public function __construct() {
         add_filter( 'cron_schedules', [ static::class, 'add_cron_interval' ] );
         add_action( static::CRON_HOOK, [ $this, 'process_batch' ] );
+        add_action( static::CONTINUE_HOOK, [ $this, 'continue_work' ] );
+        add_filter('pre_unschedule_event',[$this,'capture_due'],10,4);
         add_action( 'wp_loaded', [ $this, 'maybe_schedule_cron' ] );
     }
 
@@ -84,6 +97,7 @@ abstract class GML_Translation_Queue_Processor {
 
     public static function unschedule_cron() {
 		wp_clear_scheduled_hook( static::CRON_HOOK );
+        wp_clear_scheduled_hook(static::CONTINUE_HOOK);
     }
 
     protected function translation_work_enabled() {
@@ -106,8 +120,90 @@ abstract class GML_Translation_Queue_Processor {
         return new GML_HTML_Parser();
     }
 
-    public function process_batch() {
+    public function continue_work() { $this->process_batch('continuation'); }
+
+    public function capture_due($pre,$timestamp,$hook,$args) {
+        // WP-Cron removes the due event before invoking its callback.
+        if (defined('DOING_CRON') && DOING_CRON && !$args && $timestamp<=time()
+            && in_array($hook,[static::CRON_HOOK,static::CONTINUE_HOOK],true)) $this->due[$hook]=(int)$timestamp;
+        return $pre;
+    }
+
+    private function request_guard() {
+        // A long-lived worker must see another process's stop at the next batch boundary.
+        foreach (['gml_translation_paused','gml_multilingual_enabled','gml_ai_translation_enabled',
+            'gml_languages',static::CIRCUIT_OPTION,static::BACKOFF_OPTION,static::SAMPLE_OPTION,
+            GML_Translation_Queue_Scope::NORMAL_OPTION,GML_Translation_Queue_Scope::SAMPLE_PAUSED_OPTION,
+            'gml_manual_translation_job'] as $key) wp_cache_delete($key,'options');
+        wp_cache_delete('alloptions','options');
+        wp_cache_delete('notoptions','options');
+        if (!GML_Translation_State::multilingual_enabled() || !$this->ai_translation_available()) return 'disabled';
+        if (static::circuit_is_open()) return 'circuit';
+        if (static::backoff_is_active()) return 'backoff';
+        if (!$this->slice_manual && get_option('gml_translation_paused',false)) return 'paused';
+        if ($this->slice_token !== '' && !GML_Atomic_Option_Lock::is_owner(static::LOCK_OPTION,$this->slice_token)) return 'lock_lost';
+        if ($this->slice_manual && GML_Manual_Translation::pending_id() !== $this->slice_manual) return 'manual_changed';
+        if (!$this->slice_manual && GML_Manual_Translation::pending_id()) return 'manual_preemption';
+        if ($this->slice_language !== '' && !in_array($this->slice_language,GML_Translation_Queue_Scope::enabled_languages(),true)) return 'language_disabled';
+        if ($this->slice_scope !== '' && !hash_equals($this->slice_scope,$this->scope_fingerprint())) return 'scope_changed';
+        return '';
+    }
+
+    private function scope_fingerprint() {
+        return hash('sha256',serialize([GML_Translation_Queue_Scope::normal_languages(),static::sample_ids(),GML_Translation_Queue_Scope::sample_paused()]));
+    }
+
+    public function process_batch($trigger = 'cron') {
+        $started=microtime(true);
+        $seconds=static::RUN_SECONDS;
+        $php_limit=(int)ini_get('max_execution_time');
+        if ($php_limit>0) $seconds=min($seconds,max(1,$php_limit-5));
+        $this->run_id=wp_generate_uuid4();
+        $totals=['run_id'=>$this->run_id,'trigger'=>$trigger,'started_at'=>time(),
+            'scheduled_at'=>$this->due[$trigger==='continuation'?static::CONTINUE_HOOK:static::CRON_HOOK]??0,
+            'saved'=>0,'skipped'=>0,'failed'=>0,'provider_items'=>0,'provider_ms'=>0,'batches'=>0];
+        $reason='batch_budget';
+        GML_Translation_Budget::begin_worker($seconds,[$this,'worker_request_guard']);
+        try {
+            for ($batch=0;$batch<static::RUN_BATCHES;$batch++) {
+                if (microtime(true)>=$started+$seconds-7) { $reason='time_budget'; break; }
+                $this->slice=['exit_reason'=>'blocked','saved'=>0,'skipped'=>0,'failed'=>0,'provider_items'=>0,'provider_ms'=>0];
+                $this->process_slice();
+                $totals['batches']++;
+                foreach (['saved','skipped','failed','provider_items','provider_ms'] as $key) $totals[$key]+=$this->slice[$key];
+                $reason=$this->slice['exit_reason'];
+                if ($reason !== 'progress') break;
+                // Explicit retry samples retain their original one-batch review cadence.
+                if (!empty($this->slice['sample'])) { $reason='sample_boundary'; break; }
+                $reason='batch_budget';
+            }
+        } finally {
+            GML_Translation_Budget::end_worker();
+            $this->slice_token=''; $this->slice_manual=0;
+            if (in_array($reason,['batch_budget','time_budget','request_budget','manual_preemption'],true)
+                && ($totals['provider_items']>0 || $reason==='manual_preemption')
+                && !static::circuit_is_open() && !static::backoff_is_active()
+                && (GML_Manual_Translation::pending_id() || $this->translation_work_enabled())) {
+                if (!wp_next_scheduled(static::CONTINUE_HOOK)) wp_schedule_single_event(time()+5,static::CONTINUE_HOOK,[],true);
+            }
+            $next=array_filter([wp_next_scheduled(static::CONTINUE_HOOK),wp_next_scheduled(static::CRON_HOOK)]);
+            $totals['exit_reason']=$reason;
+            $totals['elapsed_ms']=(int)round((microtime(true)-$started)*1000);
+            $totals['next_due_at']=$next?min($next):0;
+            update_option('gml_translation_last_run',$totals,false);
+            GML_Translation_Activity::record('worker_finished',$totals);
+        }
+    }
+
+    public function worker_request_guard() { return $this->request_guard(); }
+
+    private function process_slice() {
         $manual_id = class_exists('GML_Manual_Translation') ? GML_Manual_Translation::pending_id() : 0;
+        $this->slice_manual=$manual_id;
+        $this->slice_token='';
+        $this->slice_language=''; $this->slice_scope='';
+        $guard=$this->request_guard();
+        if ($guard!=='') { $this->slice['exit_reason']=$guard; return; }
         if ($manual_id && !GML_Translation_State::multilingual_enabled()) return;
         if (
             ( ! $manual_id && get_option( 'gml_translation_paused', false ) ) ||
@@ -122,6 +218,7 @@ abstract class GML_Translation_Queue_Processor {
         global $wpdb;
         $queue_table = $wpdb->prefix . 'gml_queue';
         $sample_ids  = $manual_id ? [] : static::sample_ids();
+        $this->slice['sample']=(bool)$sample_ids;
         if ( ! $manual_id && get_option( static::SAMPLE_OPTION, [] ) && ! $sample_ids ) return;
         if ( ! $manual_id && ! GML_Translation_Queue_Scope::has_work_scope() ) {
             static::unschedule_cron();
@@ -129,8 +226,10 @@ abstract class GML_Translation_Queue_Processor {
         }
         $lock_token  = static::acquire_process_lock();
         if ( $lock_token === '' ) {
+            $this->slice['exit_reason']='locked';
             return;
         }
+        $this->slice_token=$lock_token;
         register_shutdown_function( [ static::class, 'release_process_lock' ], $lock_token );
 
         try {
@@ -173,32 +272,45 @@ abstract class GML_Translation_Queue_Processor {
             $order      = " ORDER BY target_lang ASC, context_type ASC, priority DESC, created_at ASC, id ASC LIMIT $limit";
             $last_batch = get_option( 'gml_translation_last_batch', [] );
             $last_lang  = is_array( $last_batch ) ? sanitize_key( $last_batch['language'] ?? '' ) : '';
-            // Rotate languages under the existing worker lock; one batch still runs per tick.
+            // Rotate languages within bounded slices under the existing worker lock.
             $items = $last_lang !== ''
                 ? $wpdb->get_results( $query . $wpdb->prepare( ' AND target_lang > %s', $last_lang ) . $order )
                 : [];
             if ( ! $items ) {
                 $items = $wpdb->get_results( $query . $order );
             }
+            $this->slice['raw_selected']=count((array)$items);
             if ( class_exists('GML_Page_Work_Scheduler') && ! $sample_ids && ! $manual_id ) {
                 $page_items = GML_Page_Work_Scheduler::select_items($scope_sql, $limit);
                 if ( $page_items !== null ) $items = $page_items;
             }
+            $this->slice['page_selected']=count((array)$items);
 
             if ( empty( $items ) ) {
+                $this->slice['exit_reason']='no_runnable_work';
                 if ( $sample_ids && ! (int) $wpdb->get_var( "SELECT COUNT(*) FROM $queue_table WHERE status IN ('pending','processing') AND attempts < 3 AND id IN (" . implode( ',', $sample_ids ) . ')' ) ) {
                     static::complete_sample_mode();
                 }
                 return;
             }
 
-            // One provider batch per cron run keeps runtime and API cost bounded.
+            // Contexts remain separate; the outer run may continue with the next group.
             $first      = reset( $items );
+            $this->slice_language=$first->target_lang;
+            $this->slice_scope=$this->scope_fingerprint();
             $first_type = static::api_type( $first->context_type ?? '' );
             $items      = array_values( array_filter( $items, static function( $item ) use ( $first, $first_type ) {
-                return $item->target_lang === $first->target_lang
+                return $item->source_lang === $first->source_lang && $item->target_lang === $first->target_lang
                     && static::api_type( $item->context_type ?? '' ) === $first_type;
             } ) );
+            $this->slice['context_selected']=count($items);
+            $unique=[];
+            foreach ($items as $item) {
+                $key=$item->source_hash.'|'.$item->source_lang.'|'.$item->target_lang.'|'.$item->context_type;
+                if (!isset($unique[$key])) $unique[$key]=$item;
+            }
+            $items=array_values($unique);
+            $this->slice['deduplicated']=$this->slice['context_selected']-count($items);
 			if ( ! static::renew_process_lock( $lock_token ) ) return;
 			$bounded_items = [];
 			$input_bytes   = 0;
@@ -222,6 +334,7 @@ abstract class GML_Translation_Queue_Processor {
 			}
 			$items = $bounded_items;
             $ids = array_map( static function( $item ) { return (int) $item->id; }, $items );
+            $this->slice['exit_reason']='progress';
             if ( empty( $ids ) ) {
                 return;
             }
@@ -235,6 +348,15 @@ abstract class GML_Translation_Queue_Processor {
             $saved      = false;
             $api_items  = [];
             foreach ( $items as $item ) {
+                // Recheck TM before spending: legacy duplicate Queue rows may outlive a successful write.
+                $existing=$wpdb->get_row($wpdb->prepare("SELECT status FROM {$wpdb->prefix}gml_index WHERE source_hash=%s AND source_lang=%s AND target_lang=%s",$item->source_hash,$item->source_lang,$item->target_lang));
+                if (!$manual_id && $existing) {
+                    if (in_array($existing->status,['auto','manual'],true)) {
+                        $wpdb->update($queue_table,['status'=>'completed','processed_at'=>current_time('mysql')],['id'=>(int)$item->id]);
+                        $this->slice['skipped']++;
+                    } else $this->fail_or_retry_item($wpdb,$queue_table,$item,'Existing translation requires review.',['code'=>'quality_hold']);
+                    continue;
+                }
                 if ( GML_Translation_Text::is_technical_only( $item->source_text ) ) {
                     if ( ! static::renew_process_lock( $lock_token ) ) return;
                     $saved = $this->save_translation_result(
@@ -250,6 +372,7 @@ abstract class GML_Translation_Queue_Processor {
                 $api_items[] = $item;
             }
             $items = $api_items;
+            $this->slice['provider_items']=count($items);
             if ( empty( $items ) ) {
                 if ( $saved ) {
                     static::clear_backoff();
@@ -269,12 +392,28 @@ abstract class GML_Translation_Queue_Processor {
             try {
                 if ( ! static::renew_process_lock( $lock_token ) ) return;
                 update_option( 'gml_translation_last_batch', $activity, false );
+                $provider_started=microtime(true);
                 $translated = $api->translate_batch( $texts, $source, $target, $first_type );
+                $this->slice['provider_ms']+=(int)round((microtime(true)-$provider_started)*1000);
                 if ( ! static::renew_process_lock( $lock_token ) ) return;
             } catch ( Throwable $exception ) {
+                if (isset($provider_started)) $this->slice['provider_ms']+=(int)round((microtime(true)-$provider_started)*1000);
                 if ( ! static::renew_process_lock( $lock_token ) ) return;
+                if ($exception instanceof GML_Translation_Worker_Yield) {
+                    $this->release_processing_items($wpdb,$queue_table,$ids);
+                    $this->slice['exit_reason']=$exception->getMessage();
+                    return;
+                }
                 $diagnostic = static::provider_failure( $api, $exception->getMessage() );
                 static::record_provider_failure( $api, $diagnostic, $target, count( $items ) );
+                if (in_array($diagnostic['code'],['protected_term','translation_contamination'],true)
+                    && method_exists($api,'get_last_error')
+                    && isset($api->get_last_error()['item_index'])) {
+                    $bad=(int)$api->get_last_error()['item_index'];
+                    $this->release_processing_items($wpdb,$queue_table,$ids);
+                    if (isset($items[$bad])) $this->fail_or_retry_item($wpdb,$queue_table,$items[$bad],$exception->getMessage(),$diagnostic);
+                    return;
+                }
                 if ( $diagnostic['code'] === 'output_limit' ) {
                     // The provider client has already exhausted its bounded recovery.
                     // Never repeat the same request via fallback or the next cron tick.
@@ -309,11 +448,19 @@ abstract class GML_Translation_Queue_Processor {
                     }
                     try {
                         if ( ! static::renew_process_lock( $lock_token ) ) return;
+                        $single_started=microtime(true);
                         $single = $api->translate_batch( [ $item->source_text ], $source, $target, $first_type );
+                        $this->slice['provider_ms']+=(int)round((microtime(true)-$single_started)*1000);
                         if ( ! static::renew_process_lock( $lock_token ) ) return;
                         $saved  = $this->save_translation_result( $wpdb, $queue_table, $item, $single[0] ?? null, $translator, $parser ) || $saved;
                     } catch ( Throwable $single_exception ) {
+                        if(isset($single_started)) $this->slice['provider_ms']+=(int)round((microtime(true)-$single_started)*1000);
                         if ( ! static::renew_process_lock( $lock_token ) ) return;
+                        if ($single_exception instanceof GML_Translation_Worker_Yield) {
+                            $this->release_processing_items($wpdb,$queue_table,$ids);
+                            $this->slice['exit_reason']=$single_exception->getMessage();
+                            return;
+                        }
                         $diagnostic = static::provider_failure( $api, $single_exception->getMessage() );
                         static::record_provider_failure( $api, $diagnostic, $target, 1 );
                         if ( $diagnostic['category'] === 'transient' ) {
@@ -378,7 +525,10 @@ abstract class GML_Translation_Queue_Processor {
                 $activity['finished'] = time();
                 update_option( 'gml_translation_last_batch', $activity, false );
                 $metrics = isset( $api ) && method_exists( $api, 'get_request_metrics' ) ? $api->get_request_metrics() : [];
-                $context = [ 'language' => $activity['language'], 'items' => count( $ids ?? [] ), 'calls' => count( $metrics ) ];
+                $context = $this->slice + ['run_id'=>$this->run_id,'language' => $activity['language'], 'items' => count( $ids ?? [] ), 'calls' => count( $metrics )];
+                $window=(array)get_option('gml_page_work_window',[]);
+                $context['selected_resource']=(int)($window['resource_id']??0);
+                $context['selection_reason']=$manual_id?'manual':($sample_ids?'sample':'page_priority');
                 if ( isset( $api ) ) {
                     $context['engine'] = method_exists( $api, 'get_engine' ) ? $api->get_engine() : '';
                     $context['model'] = method_exists( $api, 'get_model' ) ? $api->get_model() : '';
@@ -395,6 +545,7 @@ abstract class GML_Translation_Queue_Processor {
                 GML_Translation_Activity::record( 'batch_finished', $context );
             }
             static::release_process_lock( $lock_token );
+            $this->slice_token='';
             // Replace legacy single events after a batch, without waking a paused queue.
             if ( $this->translation_work_enabled() && GML_Translation_Queue_Scope::has_work_scope() && ! static::circuit_is_open() ) static::ensure_scheduled();
         }
@@ -482,6 +633,9 @@ abstract class GML_Translation_Queue_Processor {
                 $wpdb->update($table,['status'=>'failed','attempts'=>3,'error_message'=>'[candidate_ready] Candidate requires explicit review.','processed_at'=>current_time('mysql')],['id'=>(int)$item->id]);
                 return true;
             }
+            // Count committed TM changes even if the subsequent queue write fails.
+            $this->slice['saved']+=(int)($manual ? 1 : ($ledger['inserted']??0));
+            $this->slice['skipped']+=(int)($manual ? 0 : ($ledger['skipped']??0));
             if ( false === $wpdb->update( $table, [
                 'status'       => 'completed',
                 'processed_at' => current_time( 'mysql' ),
@@ -489,6 +643,7 @@ abstract class GML_Translation_Queue_Processor {
             ], [ 'id' => $item->id ] ) ) {
                 throw new RuntimeException( 'Translation queue update failed' );
             }
+            if (class_exists('GML_Manual_Translation')) GML_Manual_Translation::resolve_asset_failures($item);
             return true;
         } catch ( Throwable $exception ) {
             unset( $exception );
@@ -502,12 +657,15 @@ abstract class GML_Translation_Queue_Processor {
 
     private function fail_or_retry_item( $wpdb, $table, $item, $message, array $error = [] ) {
         $attempts = (int) $item->attempts + 1;
+        $terminal=in_array($error['code']??'',['output_limit','protected_term','quality_hold','format_integrity','translation_contamination'],true);
         $updated = $wpdb->update( $table, [
-            'status'        => $attempts >= 3 || ( $error['code'] ?? '' ) === 'output_limit' ? 'failed' : 'pending',
+            'status'        => $attempts >= 3 || $terminal ? 'failed' : 'pending',
             'attempts'      => $attempts,
             'error_message' => GML_Translation_Error::stored_message( $error, $message ),
             'processed_at'  => current_time( 'mysql' ),
         ], [ 'id' => $item->id ] );
+        $this->slice['failed']++;
+        $this->slice['exit_reason']='item_failure';
         $failure = GML_Translation_Error::classify( $error, $message );
         GML_Translation_Activity::record( 'item_error', $failure + [
             'queue_id' => (int) $item->id, 'source_hash' => $item->source_hash,

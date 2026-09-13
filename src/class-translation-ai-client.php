@@ -113,6 +113,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
 			return [ 'ok' => false, 'text' => '', 'error' => $this->last_error ];
 		}
 
+        GML_Translation_Budget::reserve_worker_request(strlen($system)+strlen($prompt), (int)($request['max_tokens']??4096));
         try {
             $response = $this->call_api(
 				$system,
@@ -229,6 +230,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         try {
             $translated = $this->translate_group( $unique, $source_lang, $target_lang, $type, $remaining_calls, $remaining_tokens );
         } catch ( Throwable $exception ) {
+            if ($exception instanceof GML_Translation_Worker_Yield) throw $exception;
             if ( $this->recovery_started ) {
                 $cause = sanitize_key( $this->get_last_error()['code'] ?? 'provider_error' );
                 $this->translation_failure( 'output_limit', 'Bounded output recovery stopped (' . $cause . '); review this item before retrying.' );
@@ -259,7 +261,10 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             $result = $this->generate( [ 'system' => $system, 'prompt' => $prompt, 'max_tokens' => $budget, 'retries' => 0 ] );
             if ( ! empty( $result['ok'] ) ) {
                 $translated = $count === 1 ? [ $result['text'] ] : $this->parse_batch_output( $result['text'], $count );
-                foreach ( $translated as $index => $text ) $this->check_translation_quality( $texts[$index], $text );
+                foreach ($translated as $index=>$text) {
+                    try { $this->check_translation_quality($texts[$index],$text); }
+                    catch (Throwable $error) { $this->last_error['item_index']=$index; throw $error; }
+                }
                 return $translated;
             }
             if ( ( $result['error']['code'] ?? '' ) !== 'output_limit' ) {
@@ -338,11 +343,13 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         $this->check_quality_tokens( $source_ordered, $target_ordered, 'format_ordered' );
         $this->check_quality_tokens( $source_numbered, $target_numbered, 'format_numbered' );
         $shape = static function( $text ) {
-            preg_match_all( '~(https?://[^\s<>"\']+)|(\{\{[^{}]+\}\}|\{[a-zA-Z_][a-zA-Z0-9_]*\})|(\b\d+(?:\.\d+)?(?:\s*[*x\x{00d7}]\s*\d+(?:\.\d+)?)+(?:\s*(?:mm|cm|m))?\b)~u', (string) $text, $matches, PREG_SET_ORDER );
+            preg_match_all( '~(https?://[^\s<>"\']+)|(\{\{[^{}]+\}\}|\{[a-zA-Z_][a-zA-Z0-9_]*\})|(\b\d+(?:[.,]\d+)?(?:\s*[*x\x{00d7}]\s*\d+(?:[.,]\d+)?)+(?:\s*(?:mm|cm|m))?\b)~u', (string) $text, $matches, PREG_SET_ORDER );
             $tokens = [ 'link' => [], 'placeholder' => [], 'dimension' => [] ];
             foreach ( $matches as $match ) {
                 $kind = ! empty( $match[1] ) ? 'link' : ( ! empty( $match[2] ) ? 'placeholder' : 'dimension' );
-                $tokens[$kind][] = $match[0];
+                $value=$match[0];
+                if ($kind==='dimension') $value=str_replace(',','.',preg_replace('/\\s+/u','',preg_replace('/[*x\\x{00d7}]/u','x',$value)));
+                $tokens[$kind][] = $value;
             }
             foreach ( $tokens as &$values ) sort( $values, SORT_STRING );
             unset( $values );
@@ -463,14 +470,16 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
 
         if ( $type === 'seo_title' ) {
             return $guard . 'Translate the following ' . $source . ' page title into natural, search-optimized ' . $target . '. '
-                . 'Keep it under 60 characters. Return a title only. ' . $keep
+                . 'Aim for 60 characters only when meaning, brands, model numbers and specifications can be preserved. Return a title only. ' . $keep
                 . $glossary . 'Return plain text only, with no HTML, Markdown, quotes, prefixes, or explanation.';
         }
         if ( $type === 'seo' || $type === 'seo_meta' ) {
             return $guard . 'Translate the following ' . $source . ' SEO description into natural, search-optimized ' . $target . '. '
-                . 'Keep it under 160 characters. ' . $keep
+                . 'Aim for 160 characters without dropping brands, model numbers or technical information. ' . $keep
                 . $glossary . 'Return plain text only, with no HTML, Markdown, quotes, or explanation.';
         }
+        if (preg_match('/\bapplication\b/i',$source_text) && preg_match('/\b(specifications?|voltage|equipment|OEM|quantity)\b/i',$source_text))
+            $guard .= 'In this technical request, application means intended use, not a job application. ';
         return $guard . 'Translate the following ' . $source . ' website text into natural ' . $target . '. '
             . 'Website: "' . $this->site_name . '". Tone: ' . $this->tone . '. ' . $keep
             . $glossary . 'Return plain text only, with no HTML, Markdown, quotes, or explanation.';
@@ -492,7 +501,8 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
     }
 
     private function request_timeout() {
-        return $this->translation_deadline ? max( 5, min( 60, (int) ( $this->translation_deadline - microtime( true ) ) ) ) : 60;
+        $timeout=$this->translation_deadline ? max(5,min(60,(int)($this->translation_deadline-microtime(true)))) : 60;
+        return GML_Translation_Budget::worker_timeout($timeout);
     }
 
     private function parse_batch_output( $output, $expected_count ) {

@@ -15,7 +15,7 @@ $nav=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_title'=>
 $home=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_title'=>'Home scheduler']);
 update_option('show_on_front','page'); update_option('page_on_front',$home);
 register_nav_menu('primary','Primary');
-$menu=wp_create_nav_menu('Scheduler regression');
+$menu=wp_create_nav_menu('Scheduler regression '.wp_generate_uuid4());
 wp_update_nav_menu_item($menu,0,['menu-item-object-id'=>$nav,'menu-item-object'=>'page','menu-item-type'=>'post_type','menu-item-status'=>'publish']);
 set_theme_mod('nav_menu_locations',['primary'=>$menu]);
 update_option('gml_priority_menu_location','primary');
@@ -38,6 +38,10 @@ gml_db_assert((int)$selected[0]->id===$ids[$long],'manual priority preempts an e
 $wpdb->update($q,['priority'=>0],['id'=>$ids[$long]]);
 $selected=GML_Page_Work_Scheduler::select_items('',10);
 gml_db_assert((int)$selected[0]->id===$ids[$long],'bounded page window continues instead of jumping every batch');
+$window=get_option(GML_Page_Work_Scheduler::WINDOW);
+$window['until']-=300; // Accelerated clock fixture, not a real five-minute sleep.
+update_option(GML_Page_Work_Scheduler::WINDOW,$window,false);
+gml_db_assert((int)GML_Page_Work_Scheduler::select_items('',10)[0]->id===$ids[$long],'300-second delayed wake retains the bounded page window');
 delete_option(GML_Page_Work_Scheduler::WINDOW);
 $wpdb->update($q,['created_at'=>gmdate('Y-m-d H:i:s',time()-90*DAY_IN_SECONDS)],['id'=>$ids[$long]]);
 gml_db_assert((int)GML_Page_Work_Scheduler::select_items('',10)[0]->id===$ids[$long],'aged low-traffic page eventually outranks fresh homepage demand');

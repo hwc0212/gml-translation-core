@@ -28,6 +28,42 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.10 Bounded Scheduler Correction
+
+A worker processes at most eight context-correct batches in 45 seconds (less on
+PHP installations with a shorter execution limit). Across internal provider
+recovery, no more than eight requests, 262144 input bytes and 32768 reserved
+output tokens are permitted. Requests check remaining time and the existing
+pause, AI state, language scope, lease, circuit and cooldown first.
+
+The optional `gml_translation_worker_can_request` filter lets an existing site
+budget deny a call before transport. This is not a built-in daily billing ledger.
+Actual provider cost and tokens can differ from conservative reservation caps.
+
+Budget-limited work schedules one fixed-argument `gml_continue_queue` event,
+five seconds ahead; recurring scheduling stays at 60 seconds. WP-Cron still
+requires an external wake or visitor-triggered spawn. Registering a due event
+does not promise five-second wall-clock service on an externally gated host.
+No system cron configuration is modified.
+
+Page windows last at most 900 seconds without renewal and can be preempted by
+explicit priority. Small remaining counts no longer win equal-score ties.
+Existing translation assets, held/manual protection and explicit retry-sample
+boundaries remain unchanged.
+
+`worker_finished` and `batch_finished` log selection stages, committed saves,
+skips, failures, provider elapsed time and stop/next-due information without
+source text. `scheduled_at=0` means an unknown/direct-call due time, not a
+measured punctual execution. Cron callbacks capture the original due event.
+
+Database regressions include `worker-continuation.php` and
+`worker-recovery.php`. For actual local HTTP Cron, install
+`tests/database/cron-fixture-mu.php` only in the disposable regression site,
+run `cron-http.php prepare`, invoke local `wp-cron.php` in three windows at
+least six seconds apart, then run `cron-http.php verify`. That fixture uses
+100 synthetic assets, a mock provider and two batches of 20 per window.
+It never belongs in a release ZIP or a production MU directory.
+
 ## 0.9.9 Percentage Validation Correction
 
 Numeric prose percentages such as `95% or 100%` no longer become printf space-flag

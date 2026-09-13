@@ -10,13 +10,13 @@ class GML_Translation_Activity {
     public static function record( $event, array $context = [] ) {
         global $wpdb;
         $row = [ 'at' => time(), 'event' => sanitize_key( $event ) ];
-        foreach ( [ 'engine', 'model', 'language', 'code', 'category', 'context', 'finish_reason' ] as $key ) {
+        foreach ( [ 'engine', 'model', 'language', 'code', 'category', 'context', 'finish_reason', 'run_id', 'trigger', 'selection_reason', 'exit_reason' ] as $key ) {
             if ( isset( $context[$key] ) ) {
                 $value = GML_AI_HTTP_Transport::redact( $context[$key] );
                 $row[$key] = substr( sanitize_text_field( $value ), 0, 120 );
             }
         }
-        foreach ( [ 'status', 'queue_id', 'items', 'attempts', 'until', 'input_tokens', 'output_tokens', 'max_output_tokens', 'latency_ms', 'calls', 'actor' ] as $key ) {
+        foreach ( [ 'status', 'queue_id', 'items', 'attempts', 'until', 'input_tokens', 'output_tokens', 'max_output_tokens', 'latency_ms', 'calls', 'actor', 'scheduled_at', 'started_at', 'selected_resource', 'raw_selected', 'page_selected', 'context_selected', 'deduplicated', 'provider_items', 'saved', 'skipped', 'failed', 'elapsed_ms', 'provider_ms', 'next_due_at', 'batches' ] as $key ) {
             if ( isset( $context[$key] ) && is_numeric( $context[$key] ) ) $row[$key] = max( 0, (int) $context[$key] );
         }
         if ( isset( $context['source_hash'] ) && preg_match( '/^[a-f0-9]{32}$/D', $context['source_hash'] ) ) $row['source_hash'] = $context['source_hash'];
