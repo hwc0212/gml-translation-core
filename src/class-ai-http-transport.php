@@ -137,8 +137,8 @@ class GML_AI_HTTP_Transport {
         return $url;
     }
 
-    public static function redact( $value ) {
-        $value = wp_strip_all_tags( (string) $value );
+    public static function redact( $value, $limit = 320, $preserve_format = false ) {
+        $value = $preserve_format ? (string)$value : wp_strip_all_tags( (string) $value );
         $patterns = [
             '/\bBearer\s+[A-Za-z0-9._~+\/-]+/i',
             '/\b(?:api[_ -]?key|x-goog-api-key|authorization)\s*[:=]\s*[^\s,;]+/i',
@@ -146,8 +146,9 @@ class GML_AI_HTTP_Transport {
             '/\bAIza[A-Za-z0-9_-]{12,}\b/',
         ];
         $value = preg_replace( $patterns, '[redacted]', $value );
-        $value = trim( preg_replace( '/\s+/', ' ', $value ) );
-        return function_exists( 'mb_substr' ) ? mb_substr( $value, 0, 320 ) : substr( $value, 0, 320 );
+        if (!$preserve_format) $value = trim( preg_replace( '/\s+/', ' ', $value ) );
+        $limit=max(1,min(16384,(int)$limit));
+        return function_exists( 'mb_substr' ) ? mb_substr( $value, 0, $limit ) : substr( $value, 0, $limit );
     }
 
     private function failure( $code, $message, $status, $retryable, $retry_after = 0 ) {

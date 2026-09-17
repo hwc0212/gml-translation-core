@@ -666,6 +666,7 @@ abstract class GML_Translation_Queue_Processor {
         ], [ 'id' => $item->id ] );
         $this->slice['failed']++;
         $this->slice['exit_reason']='item_failure';
+        if ($updated!==false) GML_Translation_Error::store_diagnostic($item,$error);
         $failure = GML_Translation_Error::classify( $error, $message );
         GML_Translation_Activity::record( 'item_error', $failure + [
             'queue_id' => (int) $item->id, 'source_hash' => $item->source_hash,
@@ -978,7 +979,9 @@ abstract class GML_Translation_Queue_Processor {
 
     private static function provider_failure( $provider, $message ) {
         $error = is_object( $provider ) && method_exists( $provider, 'get_last_error' ) ? $provider->get_last_error() : [];
-        return GML_Translation_Error::classify( $error, $message );
+        $failure=GML_Translation_Error::classify( $error, $message );
+        if ($failure['code']==='protected_term' && isset($error['diagnostic'])) $failure['diagnostic']=$error['diagnostic'];
+        return $failure;
     }
 
     private static function invalidate_translation_state() {

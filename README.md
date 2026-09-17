@@ -1,5 +1,13 @@
 # GML Translation Core
 
+## 0.9.12 protected-token diagnostics
+
+- Recognize fullwidth/Arabic percent signs and explicit Cyrillic length-unit/multiplication aliases without changing numbers, scale, unit meaning or dimension order. Preserve real printf types, positions, padding, width, precision and escaped percent; preserve template/URL/HTML tokens and configured protected terms.
+- Bind rejected candidates to the original input identity across deduplicated and split recovery batches. Content failures remain terminal after one worker attempt; no global queue or publication-policy changes.
+- Retain at most 100 private, non-autoloaded diagnostic records, each with a maximum 16,384-character candidate excerpt. Queue/source/language/context identity is checked before storage/read; credential-like values and sensitive URL parts are redacted. Only manage_options users can read diagnostics. Operational logs remain content-free; diagnostics never become TM or automatically accepted candidates.
+- No schema migration. Existing failures without retained candidates cannot be retroactively diagnosed; no automatic retries or production calls. Diagnostics are bounded operational evidence, not durable translation assets.
+- Synthetic tests cover deterministic failures, original batch identity, ordinary percentages, unit aliases, true printf/HTML/URL/template changes, redaction, permission and capacity bounds, escaped admin rendering, and the rc.32/rc.33 manual/held/CAS/readiness regressions.
+
 Shared, product-neutral translation code for GML Translate and the translation
 module bundled with GML SEO.
 

@@ -48,6 +48,51 @@ class GML_Translation_Error {
         return '[' . $failure['code'] . '] ' . $failure['message'];
     }
 
+    /** Private, bounded diagnostics are separate from general logs and Translation Memory. */
+    public static function store_diagnostic($item, array $failure) {
+        $detail=$failure['diagnostic']??[];
+        if (($failure['code']??'')!=='protected_term' || !is_array($detail)
+            || !hash_equals(md5((string)$item->source_text),(string)($detail['source_hash']??''))
+            || !hash_equals((string)$item->source_hash,(string)$detail['source_hash'])) return false;
+        global $wpdb;
+        $prefix='gml_translation_diagnostic_';
+        $row=[
+            'source_hash'=>$item->source_hash, 'language'=>$item->target_lang, 'context'=>$item->context_type,
+            'at'=>time(), 'rule'=>sanitize_key($detail['rule']??'protected_term'),
+            'source_count'=>max(0,(int)($detail['source_count']??0)),
+            'candidate_count'=>max(0,(int)($detail['candidate_count']??0)),
+            'first_mismatch'=>max(0,(int)($detail['first_mismatch']??0)),
+        ];
+        foreach (['source_token','candidate_token','candidate'] as $key) {
+            $raw=$detail[$key]??null;
+            $row[$key]=$raw===null?null:self::diagnostic_text((string)$raw,$key==='candidate'?16384:512);
+        }
+        $row['candidate_truncated']=isset($detail['candidate']) && mb_strlen($detail['candidate'])>16384;
+        update_option($prefix.(int)$item->id,$row,false);
+        $old=$wpdb->get_col($wpdb->prepare("SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s AND option_name<>%s ORDER BY option_id DESC LIMIT 99,100",$wpdb->esc_like($prefix).'%',$prefix.(int)$item->id));
+        foreach ((array)$old as $name) delete_option($name);
+        return true;
+    }
+
+    public static function diagnostic($item) {
+        if (!current_user_can('manage_options')) return [];
+        $row=get_option('gml_translation_diagnostic_'.(int)$item->id,[]);
+        if (!is_array($row) || ($row['source_hash']??'')!==$item->source_hash
+            || ($row['language']??'')!==$item->target_lang || ($row['context']??'')!==$item->context_type) return [];
+        return $row;
+    }
+
+    private static function diagnostic_text($text,$limit) {
+        // URL queries, fragments and userinfo may contain credentials; retain only an identity digest.
+        $text=preg_replace_callback('~https?://[^\s<>"\x27]+~u',static function($m) {
+            $parts=wp_parse_url($m[0]);
+            if (!is_array($parts) || isset($parts['query']) || isset($parts['fragment']) || isset($parts['user']) || isset($parts['pass']))
+                return '[URL sha256:'.hash('sha256',$m[0]).']';
+            return $m[0];
+        },$text);
+        return GML_AI_HTTP_Transport::redact($text,$limit,true);
+    }
+
     public static function label( $code ) {
         $labels = [
             'bad_request' => 'Invalid provider request (HTTP 400)', 'authentication_error' => 'Authentication or permission error',

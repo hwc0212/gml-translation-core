@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test "${GML_DATABASE_TESTS:-}" = 1
 
 scenario_count=0
-expected_scenarios=108
+expected_scenarios=109
 run_scenario() {
     local output
     if ! output="$("$@" 2>&1)"; then
@@ -52,6 +52,7 @@ run_scenario php "$ROOT/queue-scopes.php"
 run_scenario php "$ROOT/technical-text.php"
 run_scenario php "$ROOT/runtime-authority.php"
 run_scenario php "$ROOT/translation-quality.php"
+run_scenario php "$ROOT/protected-diagnostics.php"
 run_scenario php "$ROOT/technical-queue.php"
 run_scenario php "$ROOT/token-efficiency.php"
 run_scenario php "$ROOT/provider-budget.php"

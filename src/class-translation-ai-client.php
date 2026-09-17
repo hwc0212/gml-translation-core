@@ -231,6 +231,12 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
             $translated = $this->translate_group( $unique, $source_lang, $target_lang, $type, $remaining_calls, $remaining_tokens );
         } catch ( Throwable $exception ) {
             if ($exception instanceof GML_Translation_Worker_Yield) throw $exception;
+            if (($this->last_error['code']??'')==='protected_term' && isset($this->last_error['diagnostic']['source_hash'])) {
+                // Recovery halves and deduplication use local indexes; report the original input identity.
+                $index=array_search($this->last_error['diagnostic']['source_hash'],array_map('md5',$texts),true);
+                if ($index!==false) $this->last_error['item_index']=$index;
+                throw $exception;
+            }
             if ( $this->recovery_started ) {
                 $cause = sanitize_key( $this->get_last_error()['code'] ?? 'provider_error' );
                 $this->translation_failure( 'output_limit', 'Bounded output recovery stopped (' . $cause . '); review this item before retrying.' );
@@ -263,7 +269,14 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
                 $translated = $count === 1 ? [ $result['text'] ] : $this->parse_batch_output( $result['text'], $count );
                 foreach ($translated as $index=>$text) {
                     try { $this->check_translation_quality($texts[$index],$text); }
-                    catch (Throwable $error) { $this->last_error['item_index']=$index; throw $error; }
+                    catch (Throwable $error) {
+                        $this->last_error['item_index']=$index;
+                        if (($this->last_error['code']??'')==='protected_term') {
+                            $this->last_error['diagnostic']['source_hash']=md5($texts[$index]);
+                            $this->last_error['diagnostic']['candidate']=$text;
+                        }
+                        throw $error;
+                    }
                 }
                 return $translated;
             }
@@ -285,8 +298,9 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         return array_merge( $left, $right );
     }
 
-    private function translation_failure( $code, $message ) {
+    private function translation_failure( $code, $message, array $extra = [] ) {
         $this->last_error = [ 'code' => $code, 'message' => $message, 'status' => 0, 'retryable' => false ];
+        $this->last_error += $extra;
         throw new RuntimeException( $message );
     }
 
@@ -317,7 +331,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         // Keep %% and adjacent directives such as 5%s in the format-argument check.
         $percentages = static function( $text ) {
             $values = [];
-            $text = preg_replace_callback( '/(?<![\p{L}\p{N}_.,])([+-]?\d+(?:[.,]\d+)?)\h*%(?=$|[\s.,;:!?)\]])/u', static function( $match ) use ( &$values ) {
+            $text = preg_replace_callback( '/(?<![\p{L}\p{N}_.,])([+-]?\d+(?:[.,]\d+)?)\h*[%\x{ff05}\x{066a}](?=$|[\s.,;:!?)\]])/u', static function( $match ) use ( &$values ) {
                 $values[] = str_replace( ',', '.', $match[1] );
                 return $match[1] . ' ';
             }, (string) $text );
@@ -328,7 +342,7 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         list( $format_target, $target_percentages ) = $percentages( $target );
         $this->check_quality_tokens( $source_percentages, $target_percentages, 'percentage' );
         $formats = static function( $text ) {
-            preg_match_all( '/%%|%(?:\d+\$)?[-+ 0\x27#]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[bcdeEfFgGosuxX]/', (string) $text, $matches );
+            preg_match_all( '/%%|%(?:\d+\$)?(?:[-+ 0#]|\x27.)*(?:\d+|\*)?(?:\.(?:\d+|\*))?[bcdeEfFgGhHosuxX]/s', (string) $text, $matches );
             $ordered = [];
             $numbered = [];
             foreach ( $matches[0] as $format ) {
@@ -343,12 +357,16 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         $this->check_quality_tokens( $source_ordered, $target_ordered, 'format_ordered' );
         $this->check_quality_tokens( $source_numbered, $target_numbered, 'format_numbered' );
         $shape = static function( $text ) {
-            preg_match_all( '~(https?://[^\s<>"\']+)|(\{\{[^{}]+\}\}|\{[a-zA-Z_][a-zA-Z0-9_]*\})|(\b\d+(?:[.,]\d+)?(?:\s*[*x\x{00d7}]\s*\d+(?:[.,]\d+)?)+(?:\s*(?:mm|cm|m))?\b)~u', (string) $text, $matches, PREG_SET_ORDER );
+            preg_match_all( '~(https?://[^\s<>"\']+)|(\{\{[^{}]+\}\}|\{[a-zA-Z_][a-zA-Z0-9_]*\})|(\b\d+(?:[.,]\d+)?(?:\s*[*x\x{00d7}\x{0445}]\s*\d+(?:[.,]\d+)?)+(?:\s*(?:mm|cm|m|\x{043c}\x{043c}|\x{0441}\x{043c}|\x{043c}))?\b)~u', (string) $text, $matches, PREG_SET_ORDER );
             $tokens = [ 'link' => [], 'placeholder' => [], 'dimension' => [] ];
             foreach ( $matches as $match ) {
                 $kind = ! empty( $match[1] ) ? 'link' : ( ! empty( $match[2] ) ? 'placeholder' : 'dimension' );
                 $value=$match[0];
-                if ($kind==='dimension') $value=str_replace(',','.',preg_replace('/\\s+/u','',preg_replace('/[*x\\x{00d7}]/u','x',$value)));
+                if ($kind==='dimension') {
+                    // Explicit unit aliases only: no scale conversion, rounding or dimension reordering.
+                    $value=strtr($value,["\u{043c}\u{043c}"=>'mm',"\u{0441}\u{043c}"=>'cm',"\u{043c}"=>'m']);
+                    $value=str_replace(',','.',preg_replace('/\s+/u','',preg_replace('/[*x\x{00d7}\x{0445}]/u','x',$value)));
+                }
                 $tokens[$kind][] = $value;
             }
             foreach ( $tokens as &$values ) sort( $values, SORT_STRING );
@@ -358,6 +376,9 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         $source_shape = $shape( $source );
         $target_shape = $shape( $target );
         foreach ( $source_shape as $kind => $values ) $this->check_quality_tokens( $values, $target_shape[$kind], $kind );
+        preg_match_all('~</?[A-Za-z][^>]*>~u',(string)$source,$source_tags);
+        preg_match_all('~</?[A-Za-z][^>]*>~u',(string)$target,$target_tags);
+        $this->check_quality_tokens($source_tags[0],$target_tags[0],'html');
         if ( class_exists( 'GML_HTML_Parser' ) ) {
             $parser = new GML_HTML_Parser();
             if ( ! $parser->verify_brand_protection( $source, $target ) ) $this->translation_failure( 'protected_term', 'Translation changed a protected term; no result was accepted.' );
@@ -371,11 +392,14 @@ class GML_Translation_AI_Client implements GML_Translation_AI_Provider_Interface
         if ( $source === $target ) return;
         $first = 0;
         while ( isset( $source[$first], $target[$first] ) && $source[$first] === $target[$first] ) $first++;
-        // Store structural diagnostics only, never source/response text or URL parameters.
+        // Keep general logs content-free; the worker stores bounded private diagnostics separately.
         $this->translation_failure( 'protected_term', sprintf(
             'Translation changed protected tokens: kind=%s; source_count=%d; target_count=%d; first_mismatch=%d. No result was accepted.',
             $kind, count( $source ), count( $target ), $first + 1
-        ) );
+        ), ['diagnostic'=>[
+            'rule'=>$kind, 'source_count'=>count($source), 'candidate_count'=>count($target),
+            'first_mismatch'=>$first+1, 'source_token'=>$source[$first]??null, 'candidate_token'=>$target[$first]??null,
+        ]] );
     }
 
     private function call_api( $system_instruction, $user_text, $max_tokens, $retries ) {
