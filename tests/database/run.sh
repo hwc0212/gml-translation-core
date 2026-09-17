@@ -155,6 +155,8 @@ run_scenario php "$ROOT/page-scheduling-cache.php"
 expected_scenarios=$((expected_scenarios + 2))
 run_scenario php "$ROOT/worker-continuation.php"
 run_scenario php "$ROOT/worker-recovery.php"
+expected_scenarios=$((expected_scenarios + 1))
+run_scenario php "$ROOT/item-resolution.php"
 if [ -f "$GML_TEST_PRODUCT_DIR/tests/database/uninstall.php" ]; then
     expected_scenarios=$((expected_scenarios + 1))
     run_scenario php "$GML_TEST_PRODUCT_DIR/tests/database/uninstall.php"

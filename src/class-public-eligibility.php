@@ -75,6 +75,7 @@ final class GML_Public_Eligibility {
                 $current_rejection = $snapshot_matches && ( $review['decision'] ?? $human ) === 'rejected';
                 $page_policy = $page_readiness[ $key ][ $lang ] ?? [];
                 $partial_public = ! empty( $page_policy['ready'] );
+                if ( $partial_public && $snapshot_matches && ($review['decision'] ?? '') === 'approved' ) $human = 'approved';
                 $route = self::route( $resource, $lang, $source );
                 $public = $source_public
                     && $route['valid']

@@ -218,7 +218,8 @@ $query_before = (int) $wpdb->num_queries;
 $clusters = GML_Public_Eligibility::get_clusters_bulk( [ $approved_resource, $noindex_resource ], [ 'entrypoint' => 'test' ] );
 $cluster_queries = (int) $wpdb->num_queries - $query_before;
 remove_filter( 'gml_translation_resource_indexable', $noindex_filter, 10 );
-gml_db_assert( $cluster_queries <= 3, 'bulk public clusters use bounded review and product-indexability reads without URL by language queries' );
+// One additional batched relation read separates genuine translations from kept source.
+gml_db_assert( $cluster_queries <= 4, 'bulk public clusters use bounded review, resolution and product-indexability reads without URL by language queries' );
 gml_db_assert( $clusters[ $approved_resource->get_key() ]['languages']['qa']['public_eligible'], 'bulk cluster includes eligible approved target' );
 gml_db_assert( ! $clusters[ $noindex_resource->get_key() ]['languages']['en']['public_eligible'], 'SEO noindex resource is excluded from every language cluster' );
 

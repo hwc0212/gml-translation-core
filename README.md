@@ -28,6 +28,35 @@ authority, and expose the appropriate WordPress administration experience.
 Legacy `GML_*` class names, `gml_*` options, and database tables are retained so
 existing installations and rollback releases keep working.
 
+## 0.9.11 Explicit Resource-Local Resolution
+
+Additive schema 3.6.0 adds `gml_item_resolutions`; no Translation Memory status
+or existing option/table is renamed. An administrator may keep the exact source
+for one resource, language, context and current manifest snapshot. Critical
+items require an additional confirmation. Decisions retain actor/time and
+revocation history, use the existing worker lease and transactional snapshot
+checks, and commit with durable resource-cluster invalidation. Held/rejected
+content is not released by this decision.
+
+Page policy reports genuine auto/manual coverage separately from resolved
+coverage (translations plus explicitly kept source). The existing count and
+length threshold remains 98%; unresolved critical items still block readiness.
+Existing language URLs and navigation remain independent of AI failures.
+Runtime source overrides are page-local and do not mutate shared TM. Source,
+manifest or generation changes invalidate the decision. Revoke reopens it.
+
+Rollback to 0.9.10 leaves the additive table intact but ignores its decisions.
+Its raw readiness rows still count only actual translations, so kept source is
+not falsely published as a completed translation. Keep a database backup and
+invalidate affected rendered pages when rolling back; do not uninstall/delete
+translation data as a rollback method. The explicit delete-all uninstall path
+includes the new decision table; preserve-data uninstall retains it.
+
+Real database regression `tests/database/item-resolution.php` covers decision
+scope, source drift, critical confirmation, optional review, conflict/permission
+checks, manual protection, held/rejected states and transactional cache failure.
+The existing scheduler, Redis, root/subdirectory and format suites are retained.
+
 ## 0.9.10 Bounded Scheduler Correction
 
 A worker processes at most eight context-correct batches in 45 seconds (less on

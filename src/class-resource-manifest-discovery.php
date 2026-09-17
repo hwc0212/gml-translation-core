@@ -53,6 +53,7 @@ final class GML_Resource_Manifest_Discovery {
         $saved = GML_Resource_Manifest_Store::save_complete( $current, (array) ( $parsed['nodes'] ?? [] ) );
         if ( $saved !== true || $queue_language === '' ) return $saved;
         require_once __DIR__ . '/class-translator.php';
+        $parsed['resource']=$current;
         $queued = ( new GML_Translation_Translator() )->discover( $parsed, $queue_language );
         if ( ( $queued['enqueue_result'] ?? false ) === false ) {
             return new WP_Error( 'gml_discovery_queue_failed', 'Manifest saved, but queue discovery was blocked or failed. Retrying discovery never resumes AI work.' );

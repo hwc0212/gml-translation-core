@@ -384,7 +384,14 @@ final class GML_Resource_Approval {
                 'review_revision' => $review ? (int) $review->review_revision : 0,
             ];
             if ( ! self::snapshots_match( $expected_snapshot, $current_snapshot ) ) throw new RuntimeException( 'snapshot_conflict' );
-            if ( $machine !== 'complete' ) throw new RuntimeException( 'machine_not_complete' );
+            if ( $machine !== 'complete' ) {
+                $current_review = self::get_status( $key, $lang );
+                // A review may replace an earlier rejection; the snapshot CAS still applies.
+                $current_review['decision'] = 'unreviewed';
+                $policies = GML_Page_Readiness_Policy::evaluate_bulk( [ $key => [ $lang => $current_review ] ] );
+                $policy = $policies[$key][$lang];
+                if ( empty($policy['ready']) || empty($policy['keep_source_count']) ) throw new RuntimeException( 'machine_not_complete' );
+            }
 
             $review_revision = $current_snapshot['review_revision'] + 1;
             $review_data = [

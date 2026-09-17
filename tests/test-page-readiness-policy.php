@@ -28,3 +28,17 @@ check(!GML_Page_Readiness_Policy::evaluate($global,$coverage)['ready'], 'global 
 $threshold=99;
 check(!GML_Page_Readiness_Policy::evaluate($base,$coverage)['ready'], 'configured threshold');
 echo "11 policy cases passed\n";
+$threshold=98;
+$human=$base;
+$human['required_count']=100;
+$human['translated_count']=98;
+$human_coverage=['source_bytes'=>10000,'translated_bytes'=>9800,'resolved_bytes'=>10000,'unknown_count'=>0,'held_count'=>0,'translated_count'=>98,'keep_source_count'=>2,'auto_count'=>92,'manual_count'=>6];
+$result=GML_Page_Readiness_Policy::evaluate($human,$human_coverage);
+check($result['percent']==98 && $result['resolved_percent']==100 && $result['auto_count']===92 && $result['manual_count']===6 && $result['ready'],'92 auto + 6 manual + 2 source is 98 translated and 100 resolved');
+$boundary=$base;$boundary['translated_count']=0;
+$boundary_coverage=['source_bytes'=>10000,'translated_bytes'=>0,'resolved_bytes'=>9790,'unknown_count'=>0,'held_count'=>0,'keep_source_count'=>979];
+check(!GML_Page_Readiness_Policy::evaluate($boundary,$boundary_coverage)['ready'],'97.9 resolved cannot round up');
+$boundary_coverage['keep_source_count']=980;$boundary_coverage['resolved_bytes']=9800;
+check(GML_Page_Readiness_Policy::evaluate($boundary,$boundary_coverage)['ready'],'98 resolved exact threshold');
+$boundary_coverage['held_count']=1;
+check(!GML_Page_Readiness_Policy::evaluate($boundary,$boundary_coverage)['ready'],'resolved coverage cannot bypass hold');

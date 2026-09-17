@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_Installer {
 
-    const DB_VERSION = '3.5.0';
+    const DB_VERSION = '3.6.0';
     const ERROR_OPTION = 'gml_translation_db_error';
 
     public static function register_hooks() {
@@ -119,6 +119,29 @@ class GML_Installer {
     private static function create_tables() {
         global $wpdb;
         $cc = $wpdb->get_charset_collate();
+        $resolutions = $wpdb->prefix . 'gml_item_resolutions';
+        self::create_if_missing($resolutions,"CREATE TABLE IF NOT EXISTS $resolutions (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            active_slot CHAR(64) DEFAULT NULL,
+            resource_id BIGINT UNSIGNED NOT NULL,
+            source_hash CHAR(32) NOT NULL,
+            source_digest CHAR(64) NOT NULL,
+            source_bytes INT UNSIGNED NOT NULL,
+            source_lang VARCHAR(10) NOT NULL,
+            target_lang VARCHAR(10) NOT NULL,
+            context_type VARCHAR(20) NOT NULL,
+            manifest_generation BIGINT UNSIGNED NOT NULL,
+            manifest_fingerprint CHAR(64) NOT NULL,
+            global_generation BIGINT UNSIGNED NOT NULL,
+            critical_confirmed TINYINT(1) NOT NULL DEFAULT 0,
+            actor BIGINT UNSIGNED NOT NULL,
+            created_at DATETIME NOT NULL,
+            revoked_at DATETIME DEFAULT NULL,
+            revoked_by BIGINT UNSIGNED DEFAULT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY active_slot (active_slot),
+            KEY resource_language (resource_id,target_lang,manifest_generation,source_hash)
+        ) ENGINE=InnoDB $cc;");
         $demand = $wpdb->prefix . 'gml_page_demand';
         self::create_if_missing( $demand, "CREATE TABLE IF NOT EXISTS $demand (
             resource_id BIGINT UNSIGNED NOT NULL,

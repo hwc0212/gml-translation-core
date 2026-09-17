@@ -60,8 +60,12 @@ class GML_Translation_Translator {
 
 		$dictionary = $this->load_dictionary_for_hashes( $source_lang, $target_lang, array_keys( $unique ) );
         $uncached   = [];
+        $subject=$parsed['resource']??(class_exists('GML_Resource_Identity')?GML_Resource_Identity::current_public():null);
+        $kept=class_exists('GML_Item_Resolution')?GML_Item_Resolution::kept_hashes($subject,$target_lang):[];
         foreach ( $unique as $hash => $item ) {
-            if ( isset( $dictionary[ $hash ] ) ) {
+            if(isset($kept[$hash]) && $kept[$hash]['context_type']===$item['context_type'] && hash_equals($kept[$hash]['source_digest'],hash('sha256',$item['text']))) {
+                $replacements[$item['text']]=$item['text'];
+            } elseif ( isset( $dictionary[ $hash ] ) ) {
                 $replacements[ $item['text'] ] = $dictionary[ $hash ];
             } else {
                 $uncached[ $hash ] = $item;

@@ -18,6 +18,7 @@ final class GML_Translation_Uninstaller {
         'gml_plans',
         'gml_queue',
         'gml_index',
+        'gml_item_resolutions',
         'gml_resource_review_audit',
         'gml_resource_reviews',
         'gml_resource_translation_versions',
