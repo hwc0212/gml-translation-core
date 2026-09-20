@@ -107,4 +107,12 @@ try {
     $unsupported=GML_Manual_Translation::request($ids[2],$proof);
     gml_db_assert(is_wp_error($unsupported) && $unsupported->get_error_code()==='transaction_unavailable','nontransactional queue is refused without partial writes');
 } finally { $wpdb->query("ALTER TABLE $q ENGINE=InnoDB"); }
+$delete_snapshot=GML_Translation_Memory::edit_snapshot($existing['id']);
+$stale_delete_token=GML_Translation_Memory::edit_token($delete_snapshot);
+gml_db_assert(GML_Translation_Memory::update_reviewed($existing['id'],'Concurrent reviewed translation.',$stale_delete_token),'concurrent editor advances the translation snapshot');
+gml_db_assert(!GML_Translation_Memory::delete_by_id($existing['id'],$stale_delete_token),'stale editor cannot delete a newer translation');
+$current_delete_snapshot=GML_Translation_Memory::edit_snapshot($existing['id']);
+gml_db_assert($current_delete_snapshot['translated_text']==='Concurrent reviewed translation.','stale delete preserves the newer translation');
+gml_db_assert(GML_Translation_Memory::delete_by_id($existing['id'],GML_Translation_Memory::edit_token($current_delete_snapshot)),'current editor snapshot can delete the intended translation');
+gml_db_assert(GML_Translation_Memory::edit_snapshot($existing['id'])===null,'confirmed current delete removes only the intended translation');
 echo "OK page workflow integration\n";

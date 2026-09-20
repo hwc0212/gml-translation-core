@@ -135,6 +135,7 @@ class GML_Translation_Editor_Core {
 
         global $wpdb;
         $id = (int) ( $_POST['id'] ?? 0 );
+        $expected = sanitize_text_field( wp_unslash( $_POST['edit_snapshot'] ?? '' ) );
         if ( ! $id ) {
             wp_send_json_error( 'Missing ID' );
         }
@@ -146,9 +147,9 @@ class GML_Translation_Editor_Core {
             "SELECT source_hash, source_lang, target_lang FROM $table WHERE id = %d", $id
         ) );
 
-        $deleted = $row ? GML_Translation_Memory::delete_by_id( $id ) : false;
+        $deleted = $row && $expected !== '' ? GML_Translation_Memory::delete_by_id( $id, $expected ) : false;
         if ( false === $deleted ) {
-            wp_send_json_error( __( 'Translation could not be deleted.', static::TEXT_DOMAIN ) );
+            wp_send_json_error( __( 'Translation changed or could not be deleted. Refresh and review the current text.', static::TEXT_DOMAIN ) );
         }
 
         // Invalidate caches

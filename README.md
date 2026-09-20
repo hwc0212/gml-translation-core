@@ -1,5 +1,12 @@
 # GML Translation Core
 
+## 0.9.13 Snapshot-safe translation deletion
+
+- Add an optional full-row snapshot token to `GML_Translation_Memory::delete_by_id()` and recheck it under the existing translation mutation transaction before deleting.
+- Require the legacy Translation Editor adapter to supply that token. A stale browser can no longer delete a newer automatic, manual, or held translation written after the row was loaded.
+- Keep internal maintenance callers backward compatible while preserving the existing readiness, approval-generation, and resource-cluster invalidation contract.
+- Add a real WordPress/MariaDB regression proving stale deletion is rejected, the newer tuple is preserved, and a current snapshot can delete exactly the intended tuple.
+
 ## 0.9.12 protected-token diagnostics
 
 - Recognize fullwidth/Arabic percent signs and explicit Cyrillic length-unit/multiplication aliases without changing numbers, scale, unit meaning or dimension order. Preserve real printf types, positions, padding, width, precision and escaped percent; preserve template/URL/HTML tokens and configured protected terms.

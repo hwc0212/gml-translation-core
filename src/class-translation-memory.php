@@ -252,21 +252,27 @@ final class GML_Translation_Memory {
         return $saved!==false;
     }
 
-    public static function delete_by_id( $id ) {
+    public static function delete_by_id( $id, $expected = '' ) {
         global $wpdb;
         $id = (int) $id;
         if ( $id < 1 ) return false;
         $table = $wpdb->prefix . 'gml_index';
-        $row = $wpdb->get_row( $wpdb->prepare(
-            "SELECT id,source_hash,source_lang,target_lang FROM $table WHERE id=%d",
-            $id
-        ) );
+        $expected = (string) $expected;
+        $row = self::edit_snapshot( $id );
         if ( ! $row ) return false;
-        $mutate = static function () use ( $wpdb, $table, $id ) {
+        if ( $expected !== '' && ! hash_equals( self::edit_token( $row ), $expected ) ) return false;
+        $mutate = static function () use ( $wpdb, $table, $id, $expected ) {
+            if ( $expected !== '' ) {
+                $current = $wpdb->get_row(
+                    $wpdb->prepare( "SELECT * FROM $table WHERE id=%d FOR UPDATE", $id ),
+                    ARRAY_A
+                );
+                if ( ! $current || ! hash_equals( self::edit_token( $current ), $expected ) ) return false;
+            }
             return $wpdb->delete( $table, [ 'id' => $id ] );
         };
         return class_exists( 'GML_Resource_Readiness' )
-            ? false !== GML_Resource_Readiness::apply_translation_changes( [ [ 'source_hash' => $row->source_hash, 'target_lang' => $row->target_lang ] ], $mutate )
+            ? false !== GML_Resource_Readiness::apply_translation_changes( [ [ 'source_hash' => $row['source_hash'], 'target_lang' => $row['target_lang'] ] ], $mutate )
             : false !== $mutate();
     }
 
