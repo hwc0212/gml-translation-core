@@ -149,7 +149,7 @@ class GML_Translation_Editor_Core {
 
         $deleted = $row && $expected !== '' ? GML_Translation_Memory::delete_by_id( $id, $expected ) : false;
         if ( false === $deleted ) {
-            wp_send_json_error( __( 'Translation changed or could not be deleted. Refresh and review the current text.', static::TEXT_DOMAIN ) );
+            wp_send_json_error( __( 'The source or translation changed. Refresh and review it again.', static::TEXT_DOMAIN ) );
         }
 
         // Invalidate caches
