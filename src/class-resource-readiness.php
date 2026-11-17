@@ -190,6 +190,11 @@ final class GML_Resource_Readiness {
         return $written;
     }
 
+    /** Manifest discovery may acknowledge only a full configured snapshot. */
+    public static function refresh_manifest_snapshot( $resource_id ) {
+        return self::recalculate_resources( [ (int) $resource_id ] ) === count( self::configured_languages() );
+    }
+
     /** Fail closed for every current resource related to a changed TM hash. */
     public static function translation_changed( $source_hash, $target_lang ) {
         self::migrate_legacy_continuation();

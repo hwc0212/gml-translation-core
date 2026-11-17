@@ -63,7 +63,7 @@ final class GML_Resource_Backfill {
                 $result = $discovery->discover( $resource );
                 if ( $result !== true ) {
                     $row = GML_Resource_Manifest_Store::get_by_key( $resource->get_key() );
-                    if ( ! $row || ! in_array( $row->discovery_state, [ 'complete', 'excluded', 'permanent_redirect' ], true ) ) {
+                    if ( ! $row || ! in_array( $row->discovery_state, [ 'excluded', 'permanent_redirect' ], true ) ) {
                         GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
                         GML_Resource_Manifest_Manager::record_failure( $resource->get_key(), $result, 'backfill' );
                     }

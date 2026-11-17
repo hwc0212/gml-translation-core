@@ -229,7 +229,7 @@ final class GML_Resource_Manifest_Manager {
                 if ( ! GML_Atomic_Option_Lock::refresh( GML_Resource_Backfill::LOCK, $token, 180 ) ) break;
                 $result = $discovery->discover( $key );
                 $row = GML_Resource_Manifest_Store::get_by_key( $key );
-                $terminal = $row && in_array( $row->discovery_state, [ 'complete', 'excluded', 'permanent_redirect' ], true );
+                $terminal = $row && in_array( $row->discovery_state, [ 'excluded', 'permanent_redirect' ], true );
                 if ( $result !== true && ! $terminal ) {
                     self::add_dirty( $key );
                     self::record_failure( $key, $result );

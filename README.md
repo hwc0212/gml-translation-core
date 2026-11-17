@@ -4,6 +4,7 @@
 
 - Discover and rebuild textarea UI attributes and input button/reset captions; only unnamed submit captions are translatable. Preserve textarea contents, hidden/user values and named-submit business values.
 - Claim dirty hints atomically before rendering; preserve new edits and failed work. Recover orphaned stale/unknown/render-error manifests from the database using the existing maintenance event. No provider work is started.
+- A manifest is acknowledged only after all configured readiness rows are saved. Partial writes keep it private and retryable without changing TM.
 - Persist a backfill wakeup before rendering. Retry failed resources and fence checkpoints against newer pauses/resets.
 - Expose bounded inventory diagnostics and concrete readiness mismatch codes without source text, translation text, lock tokens or remote error messages.
 - No schema, URL, readiness-threshold or translation-data migration. Only GML Translate consumes this candidate; GML SEO remains pinned to its existing Core.

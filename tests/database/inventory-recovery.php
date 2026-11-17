@@ -72,6 +72,35 @@ gml_db_assert(in_array($key,(array)get_option(GML_Resource_Manifest_Manager::DIR
 gml_db_assert(GML_Resource_Readiness::get_status($key,'de')==='stale','concurrent edit cannot publish the superseded discovery');
 GML_Resource_Manifest_Manager::process_dirty();
 gml_db_assert(GML_Resource_Readiness::get_status($key,'de')==='complete','concurrently dirtied resource completes on its next pass');
+GML_Resource_Manifest_Manager::add_dirty($key);
+$during_render=static function() use($id) { wp_update_post(['ID'=>$id,'post_name'=>'inventory-recovery-'.wp_generate_uuid4()]); };
+GML_Resource_Manifest_Manager::process_dirty();
+$changed_failure=(array)get_option(GML_Resource_Manifest_Manager::FAILURE_OPTION,[]);
+gml_db_assert(GML_Resource_Readiness::get_status($key,'de')==='stale','source change during rendering leaves a stale snapshot private');
+gml_db_assert(($changed_failure['error_code']??'')==='gml_resource_changed','stale discovery reports the exact changed-source error');
+gml_db_assert(in_array($key,(array)get_option(GML_Resource_Manifest_Manager::DIRTY_OPTION,[]),true),'changed-source discovery remains pending after its failed pass');
+GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert(GML_Resource_Readiness::get_status($key,'de')==='complete','changed-source stale snapshot recovers on a fresh render');
+$reject_readiness=true;
+$write_failure=static function($sql) use(&$reject_readiness){
+ if($reject_readiness && preg_match('/^REPLACE INTO .?test_gml_resource_readiness/i',$sql)){
+  $reject_readiness=false;return 'INSERT INTO test_gml_intentionally_missing_table VALUES (1)';
+ }
+ return $sql;
+};
+add_filter('query',$write_failure);
+$old_suppression=$wpdb->suppress_errors(true);
+GML_Resource_Manifest_Manager::add_dirty($key);
+GML_Resource_Manifest_Manager::process_dirty();
+$wpdb->suppress_errors($old_suppression);
+remove_filter('query',$write_failure);
+gml_db_assert(!$reject_readiness,'test injected a real readiness write failure');
+gml_db_assert(GML_Resource_Readiness::get_status($key,'de')==='stale','partial readiness save keeps the manifest private');
+$partial_failure=(array)get_option(GML_Resource_Manifest_Manager::FAILURE_OPTION,[]);
+gml_db_assert(($partial_failure['error_code']??'')==='gml_readiness_write','partial snapshot exposes its exact retry reason');
+gml_db_assert(in_array($key,(array)get_option(GML_Resource_Manifest_Manager::DIRTY_OPTION,[]),true),'partial readiness save is not acknowledged as completed work');
+GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert(GML_Resource_Readiness::get_status($key,'de')==='complete','partial readiness save recovers with existing TM');
 GML_Resource_Backfill::reset_pending('pause_during_render');
 delete_option(GML_Resource_Manifest_Manager::DIRTY_OPTION);
 $during_render=static function() { GML_Resource_Backfill::pause(); };
