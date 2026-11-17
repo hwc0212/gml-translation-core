@@ -2,6 +2,7 @@
 
 ## 0.9.14 Form UI and inventory recovery (local candidate, 2026-11-17)
 
+- Apply HTML quote rules even after literal backslashes, preserving textarea raw contents.
 - Discover and rebuild textarea UI attributes and input button/reset captions; only unnamed submit captions are translatable. Preserve textarea contents, hidden/user values and named-submit business values.
 - Claim dirty hints atomically before rendering; preserve new edits and failed work. Recover orphaned stale/unknown/render-error manifests from the database using the existing maintenance event. No provider work is started.
 - A manifest is acknowledged only after all configured readiness rows are saved. Partial writes keep it private and retryable without changing TM.

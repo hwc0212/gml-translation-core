@@ -450,7 +450,8 @@ class GML_HTML_Parser {
             for ( ; $end < $length; $end++ ) {
                 $char = $html[ $end ];
                 if ( $quote !== '' ) {
-                    if ( $char === $quote && ( $end === 0 || $html[ $end - 1 ] !== '\\' ) ) {
+                    // HTML attributes do not use backslash quote escaping.
+                    if ( $char === $quote ) {
                         $quote = '';
                     }
                     continue;
