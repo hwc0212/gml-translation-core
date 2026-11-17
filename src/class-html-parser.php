@@ -17,7 +17,7 @@ require_once __DIR__ . '/class-translation-text.php';
 
 class GML_HTML_Parser {
 
-    private $skip_tags = [ 'script', 'style', 'code', 'pre', 'svg', 'noscript', 'iframe', 'textarea' ];
+    private $skip_tags = [ 'script', 'style', 'code', 'pre', 'svg', 'noscript', 'iframe' ];
     private $text_attrs = [ 'alt', 'placeholder', 'aria-label', 'aria-description' ];
     private $seo_meta_names = [
         'title', 'description', 'keywords',
@@ -87,6 +87,10 @@ class GML_HTML_Parser {
             return $token;
         };
 
+        // Protect textarea contents before creating inner comment/code tokens.
+        // Only the opening tag's UI attributes may be translated.
+        $html = $this->translate_form_ui_attributes( $html, $replacements, $tokenise );
+
         // ── Block-level protection (must run first) ──────────────────────────
 
         // L) HTML comments <!-- ... --> — may contain conditional comments,
@@ -151,15 +155,6 @@ class GML_HTML_Parser {
         //    visible to JS-enabled users. str_replace could corrupt it.
         $html = preg_replace_callback(
             '/<noscript\b[^>]*>.*?<\/noscript>/si',
-            $tokenise,
-            $html
-        );
-
-        // S) <textarea>...</textarea> — form textarea default values.
-        //    Content between tags is raw text, not child elements.
-        //    walk() skips <textarea>, but str_replace could hit matching text.
-        $html = preg_replace_callback(
-            '/<textarea\b[^>]*>.*?<\/textarea>/si',
             $tokenise,
             $html
         );
@@ -320,6 +315,68 @@ class GML_HTML_Parser {
      * all markup is tokenised. Everything else inside a tag remains byte-for-
      * byte unchanged.
      */
+    private function translate_form_ui_attributes( $html, array $replacements, callable $tokenise ) {
+        $stack = [];
+        $void_tags = array_merge( $this->skip_tags, [ 'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr', 'textarea' ] );
+        $selectors = get_option( 'gml_exclude_selectors', [] );
+        if ( class_exists( 'GML_Exclusion_Rules' ) ) {
+            $selectors = array_merge( $selectors, ( new GML_Exclusion_Rules() )->get_excluded_selectors() );
+        }
+        return $this->map_html_tags( $html, function( $tag ) use ( $replacements, &$stack, $void_tags, $selectors ) {
+            if ( ! preg_match( '~^<(/?)([a-zA-Z][a-zA-Z0-9:-]*)\b~', $tag, $name ) ) return $tag;
+            $name_text = strtolower( $name[2] );
+            if ( $name[1] === '/' ) {
+                for ( $i = count( $stack ) - 1; $i >= 0; $i-- ) {
+                    if ( $stack[$i][0] === $name_text ) { $stack = array_slice( $stack, 0, $i ); break; }
+                }
+                return $tag;
+            }
+            // Consume whole attributes so data-value or quoted JSON cannot be
+            // mistaken for a control's actual value/type attribute.
+            $pattern = '~(\s+)([^\s=/>]+)(\s*=\s*)(?:(["\'])(.*?)\4|([^\s>]+))~s';
+            preg_match_all( $pattern, $tag, $matches, PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL );
+            $attributes = [];
+            foreach ( $matches as $attribute ) {
+                $key = strtolower( $attribute[2] );
+                if ( ! array_key_exists( $key, $attributes ) ) {
+                    $attributes[$key] = html_entity_decode( $attribute[4] !== null ? $attribute[5] : $attribute[6], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                }
+            }
+            $classes = preg_split( '/\s+/', $attributes['class'] ?? '' );
+            $excluded = ( $stack && $stack[count($stack) - 1][1] )
+                || ( $attributes['translate'] ?? '' ) === 'no'
+                || in_array( 'notranslate', $classes, true );
+            foreach ( $selectors as $selector ) {
+                $selector = trim( $selector );
+                if ( $selector === '' ) continue;
+                if ( $selector[0] === '.' && in_array( substr( $selector, 1 ), $classes, true ) ) $excluded = true;
+                if ( $selector[0] === '#' && ( $attributes['id'] ?? '' ) === substr( $selector, 1 ) ) $excluded = true;
+            }
+            if ( ! in_array( $name_text, $void_tags, true ) ) $stack[] = [ $name_text, $excluded ];
+            if ( $excluded ) return $tag;
+            $allowed = $name_text === 'textarea' ? $this->text_attrs : [];
+            if ( $name_text === 'input' && $this->input_has_ui_value( $attributes['type'] ?? '', $attributes['name'] ?? '' ) ) {
+                $allowed[] = 'value';
+            }
+            if ( ! $allowed ) return $tag;
+            return preg_replace_callback( $pattern, function( $attribute ) use ( $replacements, $allowed ) {
+                if ( ! in_array( strtolower( $attribute[2] ), $allowed, true ) ) return $attribute[0];
+                $raw = $attribute[4] !== null ? $attribute[5] : $attribute[6];
+                $translated = $this->translated_attribute_value( $raw, $replacements );
+                if ( $translated === $raw ) return $attribute[0];
+                $quote = $attribute[4] !== null ? $attribute[4] : '"';
+                return $attribute[1] . $attribute[2] . $attribute[3] . $quote . $translated . $quote;
+            }, $tag, -1, $count, PREG_UNMATCHED_AS_NULL );
+        }, $tokenise );
+    }
+
+    private function input_has_ui_value( $type, $name ) {
+        $type = strtolower( $type );
+        // Named submit values can be successful controls used for routing.
+        return in_array( $type, [ 'button', 'reset' ], true )
+            || ( $type === 'submit' && $name === '' );
+    }
+
     private function translate_allowed_tag_attributes( $html, array $replacements ) {
         return $this->map_html_tags(
             (string) $html,
@@ -366,7 +423,7 @@ class GML_HTML_Parser {
      * Transform complete HTML tags while respecting quoted > characters used
      * by page-builder JSON and inline configuration attributes.
      */
-    private function map_html_tags( $html, callable $callback ) {
+    private function map_html_tags( $html, callable $callback, $textarea_callback = null ) {
         $html   = (string) $html;
         $length = strlen( $html );
         $offset = 0;
@@ -379,6 +436,14 @@ class GML_HTML_Parser {
                 break;
             }
             $result .= substr( $html, $offset, $start - $offset );
+
+            if ( substr( $html, $start, 4 ) === '<!--' ) {
+                $close = strpos( $html, '-->', $start + 4 );
+                if ( $close === false ) { $result .= substr( $html, $start ); break; }
+                $offset = $close + 3;
+                $result .= substr( $html, $start, $offset - $start );
+                continue;
+            }
 
             $quote = '';
             $end   = $start + 1;
@@ -405,8 +470,21 @@ class GML_HTML_Parser {
             }
 
             $tag = substr( $html, $start, $end - $start + 1 );
-            $result .= call_user_func( $callback, $tag );
+            $mapped_tag = call_user_func( $callback, $tag );
             $offset = $end + 1;
+            if ( preg_match( '~^<(textarea|script|style|code|pre|svg|noscript|iframe)\b~i', $tag, $raw ) ) {
+                if ( preg_match( '~</' . $raw[1] . '\s*>~i', $html, $close, PREG_OFFSET_CAPTURE, $offset ) ) {
+                    $raw_end = $close[0][1] + strlen( $close[0][0] );
+                } else {
+                    $raw_end = $length;
+                }
+                $block = $mapped_tag . substr( $html, $offset, $raw_end - $offset );
+                $result .= strtolower( $raw[1] ) === 'textarea' && $textarea_callback
+                    ? call_user_func( $textarea_callback, [ $block ] ) : $block;
+                $offset = $raw_end;
+                continue;
+            }
+            $result .= $mapped_tag;
         }
 
         return $result;
@@ -450,7 +528,11 @@ class GML_HTML_Parser {
             // Translate <title> as SEO meta (affects browser tab + search snippet)
             if ( $tag === 'title' ) { $this->extract_title( $node, $nodes ); return; }
 
-            foreach ( $this->text_attrs as $attr ) {
+            $attrs = $this->text_attrs;
+            if ( $tag === 'input' && $this->input_has_ui_value( $node->getAttribute( 'type' ), $node->getAttribute( 'name' ) ) ) {
+                $attrs[] = 'value';
+            }
+            foreach ( $attrs as $attr ) {
                 if ( $node->hasAttribute( $attr ) ) {
                     $val = trim( $node->getAttribute( $attr ) );
                     if ( $val !== '' && ! $this->skip_text( $val ) ) {
@@ -458,6 +540,7 @@ class GML_HTML_Parser {
                     }
                 }
             }
+            if ( $tag === 'textarea' ) return;
         }
 
         if ( $node->nodeType === XML_TEXT_NODE ) {

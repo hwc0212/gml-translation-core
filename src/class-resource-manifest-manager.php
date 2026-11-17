@@ -6,6 +6,7 @@ final class GML_Resource_Manifest_Manager {
     const GLOBAL_OPTION = 'gml_resource_manifest_global_generation';
     const DIRTY_OPTION = 'gml_resource_manifest_dirty';
     const DIRTY_HOOK = 'gml_resource_manifest_dirty';
+    const FAILURE_OPTION = 'gml_resource_manifest_last_failure';
     private static $registered = false;
     private static $global_bumped = false;
 
@@ -25,6 +26,7 @@ final class GML_Resource_Manifest_Manager {
             add_action($hook, [__CLASS__, 'seo_meta_changed'], 40, 4);
         }
         add_action( self::DIRTY_HOOK, [ __CLASS__, 'process_dirty' ] );
+        add_action( GML_Resource_Readiness::REBUILD_HOOK, [ __CLASS__, 'recover_pending' ], 5 );
         add_action( 'gml_resource_readiness_reverse', [ __CLASS__, 'process_reverse' ] );
         GML_Resource_Readiness::register_hooks();
         GML_Resource_Backfill::register_hooks();
@@ -140,42 +142,131 @@ final class GML_Resource_Manifest_Manager {
     }
 
     public static function add_dirty( $key ) {
-        $dirty = array_values( array_unique( array_filter( (array) get_option( self::DIRTY_OPTION, [] ) ) ) );
-        $dirty[] = substr( (string) $key, 0, 191 );
-        $dirty = array_values(array_unique($dirty));
-        if (count($dirty) > 200) {
-            // Final merged size, including the triggering post, owns overflow.
-            foreach (array_slice($dirty, 0, count($dirty)-200) as $retired_key) {
-                GML_Resource_Manifest_Store::exclude_retired_key($retired_key);
-            }
-            GML_Resource_Backfill::reset_pending('dirty_overflow');
+        $key = substr( (string) $key, 0, 191 );
+        if ( $key === '' ) return false;
+        $overflow = [];
+        $saved = self::mutate_dirty( static function( $dirty ) use ( $key, &$overflow ) {
+            $dirty[] = $key;
+            $dirty = array_values( array_unique( $dirty ) );
+            $overflow = array_slice( $dirty, 0, max( 0, count( $dirty ) - 200 ) );
+            return array_slice( $dirty, -200 );
+        } );
+        if ( $overflow || ! $saved ) {
+            foreach ( $overflow as $retired_key ) GML_Resource_Manifest_Store::exclude_retired_key( $retired_key );
+            GML_Resource_Backfill::reset_pending( 'dirty_overflow' );
             GML_Resource_Backfill::maybe_schedule();
-            $dirty = array_slice($dirty, -200);
         }
-        update_option( self::DIRTY_OPTION, $dirty, false );
-        if ( ! wp_next_scheduled( self::DIRTY_HOOK ) ) wp_schedule_single_event( time() + 15, self::DIRTY_HOOK );
+        self::schedule_dirty();
+        return $saved;
+    }
+
+    /** Atomic hints; the manifest table remains the durable work authority. */
+    private static function mutate_dirty( callable $change ) {
+        global $wpdb;
+        for ( $attempt = 0; $attempt < 5; $attempt++ ) {
+            $raw = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s", self::DIRTY_OPTION ) );
+            if ( $wpdb->last_error !== '' ) return false;
+            $dirty = array_values( array_unique( array_filter( (array) maybe_unserialize( $raw ) ) ) );
+            $next = array_values( call_user_func( $change, $dirty ) );
+            $value = maybe_serialize( $next );
+            if ( $raw === $value ) return true;
+            $saved = $raw === null
+                ? $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name,option_value,autoload) VALUES (%s,%s,'no')", self::DIRTY_OPTION, $value ) )
+                : $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value=%s,autoload='no' WHERE option_name=%s AND BINARY option_value=BINARY %s", $value, self::DIRTY_OPTION, $raw ) );
+            if ( $saved === false ) return false;
+            if ( $saved === 1 ) {
+                wp_cache_delete( self::DIRTY_OPTION, 'options' );
+                wp_cache_delete( 'alloptions', 'options' );
+                wp_cache_delete( 'notoptions', 'options' );
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function schedule_dirty() {
+        if ( ! wp_next_scheduled( self::DIRTY_HOOK ) ) wp_schedule_single_event( time() + 30, self::DIRTY_HOOK );
+    }
+
+    /** Recover work lost by an interrupted or older worker, without AI work. */
+    public static function recover_pending( $mode = 'recovery' ) {
+        if ( $mode !== 'recovery' ) return;
+        if ( ! GML_Resource_Manifest_Store::tables_ready() ) return;
+        global $wpdb;
+        $table = GML_Resource_Manifest_Store::manifest_table();
+        $keys = $wpdb->get_col( $wpdb->prepare(
+            "SELECT resource_key FROM $table WHERE discovery_state IN ('stale','unknown','render_error')
+             AND global_generation=%d ORDER BY updated_at ASC,id ASC LIMIT %d",
+            self::global_generation(), GML_Resource_Backfill::BATCH
+        ) );
+        foreach ( (array) $keys as $key ) self::add_dirty( $key );
+    }
+
+    public static function record_failure( $key, $result, $phase = 'dirty' ) {
+        update_option( self::FAILURE_OPTION, [
+            'resource_key' => substr( (string) $key, 0, 191 ),
+            'error_code' => is_wp_error( $result ) ? sanitize_key( $result->get_error_code() ) : 'gml_manifest_write',
+            'phase' => sanitize_key( $phase ), 'updated_at' => time(),
+        ], false );
     }
 
     public static function process_dirty() {
-        $dirty = (array) get_option( self::DIRTY_OPTION, [] );
-        if ( ! $dirty ) return;
+        if ( ! get_option( self::DIRTY_OPTION, [] ) ) self::recover_pending();
+        if ( ! get_option( self::DIRTY_OPTION, [] ) ) return;
+        // Persist the wakeup before claiming. A killed worker leaves stale
+        // manifests that the next event can reconstruct into dirty hints.
+        self::schedule_dirty();
         $token = GML_Atomic_Option_Lock::acquire( GML_Resource_Backfill::LOCK, 180 );
-        if ( $token === '' ) { wp_schedule_single_event( time() + 30, self::DIRTY_HOOK ); return; }
+        if ( $token === '' ) return;
+        $batch = [];
         try {
-            $batch = array_slice( $dirty, 0, 5 );
+            if ( ! self::mutate_dirty( static function( $dirty ) use ( &$batch ) {
+                $batch = array_slice( $dirty, 0, GML_Resource_Backfill::BATCH );
+                return array_slice( $dirty, count( $batch ) );
+            } ) ) return;
             $discovery = new GML_Resource_Manifest_Discovery();
             foreach ( $batch as $key ) {
-                if ( ! GML_Atomic_Option_Lock::refresh( GML_Resource_Backfill::LOCK, $token, 180 ) ) return;
-                $discovery->discover( $key );
+                if ( ! GML_Atomic_Option_Lock::refresh( GML_Resource_Backfill::LOCK, $token, 180 ) ) break;
+                $result = $discovery->discover( $key );
+                $row = GML_Resource_Manifest_Store::get_by_key( $key );
+                $terminal = $row && in_array( $row->discovery_state, [ 'complete', 'excluded', 'permanent_redirect' ], true );
+                if ( $result !== true && ! $terminal ) {
+                    self::add_dirty( $key );
+                    self::record_failure( $key, $result );
+                } elseif ( in_array( $key, (array) get_option( self::DIRTY_OPTION, [] ), true ) ) {
+                    // An edit during rendering belongs to another pass.
+                    GML_Resource_Manifest_Store::mark_stale_by_key( $key );
+                }
+                array_shift( $batch );
             }
-            $dirty = array_slice( $dirty, count( $batch ) );
-            if ( $dirty ) {
-                update_option( self::DIRTY_OPTION, $dirty, false );
-                wp_schedule_single_event( time() + 30, self::DIRTY_HOOK );
-            } else delete_option( self::DIRTY_OPTION );
+            if ( ! get_option( self::DIRTY_OPTION, [] ) ) delete_option( self::FAILURE_OPTION );
         } finally {
+            foreach ( $batch as $key ) self::add_dirty( $key );
             GML_Atomic_Option_Lock::release( GML_Resource_Backfill::LOCK, $token );
         }
+    }
+
+    /** Admin-only caller decides display; no private content or remote messages. */
+    public static function diagnostics( $key ) {
+        $row = GML_Resource_Manifest_Store::get_by_key( $key );
+        $dirty = (array) get_option( self::DIRTY_OPTION, [] );
+        $state = GML_Resource_Backfill::state();
+        $failure = (array) get_option( self::FAILURE_OPTION, [] );
+        $lock = GML_Atomic_Option_Lock::get( GML_Resource_Backfill::LOCK );
+        return [
+            'backfill' => array_intersect_key( $state, array_flip( [ 'status', 'phase', 'cursor', 'updated_at', 'reason' ] ) ),
+            'dirty_count' => count( $dirty ), 'resource_pending' => in_array( $key, $dirty, true ),
+            'manifest_state' => $row ? $row->discovery_state : 'missing',
+            'manifest_global_generation' => $row ? (int) $row->global_generation : 0,
+            'current_global_generation' => self::global_generation(),
+            'manifest_updated_at' => $row ? $row->updated_at : '',
+            'manifest_discovered_at' => $row ? $row->discovered_at : '',
+            'lock_active' => (int) $lock['expires'] > time(), 'lock_expires_at' => (int) $lock['expires'],
+            'next_dirty_run' => wp_next_scheduled( self::DIRTY_HOOK ),
+            'next_backfill_run' => wp_next_scheduled( GML_Resource_Backfill::HOOK ),
+            'last_failure' => ( $failure['resource_key'] ?? '' ) === $key
+                ? array_intersect_key( $failure, array_flip( [ 'error_code', 'phase', 'updated_at' ] ) ) : [],
+        ];
     }
 
     public static function process_reverse() { GML_Resource_Readiness::continue_reverse(); }

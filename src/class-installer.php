@@ -410,6 +410,7 @@ class GML_Installer {
             'gml_resource_manifest_global_generation',
             'gml_resource_backfill_state',
             'gml_resource_manifest_dirty',
+        'gml_resource_manifest_last_failure',
             'gml_resource_readiness_reverse_state',
         ];
         $defaults['gml_resource_manifest_global_generation'] = 1;
@@ -435,6 +436,7 @@ class GML_Installer {
             'gml_resource_manifest_global_generation',
             'gml_resource_backfill_state',
             'gml_resource_manifest_dirty',
+        'gml_resource_manifest_last_failure',
             'gml_resource_readiness_reverse_state',
         ];
         if ( function_exists( 'wp_set_option_autoload_values' ) ) {

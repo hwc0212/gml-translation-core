@@ -45,25 +45,58 @@ final class GML_Resource_Backfill {
             self::maybe_schedule();
             return;
         }
+        self::maybe_schedule(); // A process exit must not consume the only wakeup.
         $token = GML_Atomic_Option_Lock::acquire( self::LOCK, 180 );
         if ( $token === '' ) { self::maybe_schedule(); return; }
         try {
-            $state['status'] = 'running'; $state['updated_at'] = time();
-            update_option( self::OPTION, $state, false );
+            add_option( self::OPTION, self::state(), '', false );
+            $state = self::state();
+            if ( in_array( $state['status'], [ 'paused', 'complete' ], true ) ) return;
+            $running = $state;
+            $running['status'] = 'running'; $running['updated_at'] = time();
+            if ( ! self::checkpoint( $state, $running ) && self::state() !== $running ) return;
+            $state = $running;
             $resources = self::next_resources( $state );
             $discovery = new GML_Resource_Manifest_Discovery();
             foreach ( $resources as $resource ) {
                 if ( ! GML_Atomic_Option_Lock::refresh( self::LOCK, $token, 180 ) ) return;
-                $discovery->discover( $resource );
+                $result = $discovery->discover( $resource );
+                if ( $result !== true ) {
+                    $row = GML_Resource_Manifest_Store::get_by_key( $resource->get_key() );
+                    if ( ! $row || ! in_array( $row->discovery_state, [ 'complete', 'excluded', 'permanent_redirect' ], true ) ) {
+                        GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
+                        GML_Resource_Manifest_Manager::record_failure( $resource->get_key(), $result, 'backfill' );
+                    }
+                }
             }
             $state['status'] = $state['phase'] === 'complete' ? 'complete' : 'pending';
             $state['updated_at'] = time();
-            update_option( self::OPTION, $state, false );
+            self::checkpoint( $running, $state );
             self::clear_language_readiness();
         } finally {
             GML_Atomic_Option_Lock::release( self::LOCK, $token );
+            self::maybe_schedule();
         }
         if ( $state['status'] !== 'complete' ) self::maybe_schedule();
+    }
+
+    /** Do not overwrite a reset or explicit pause made during rendering. */
+    private static function checkpoint( array $expected, array $next ) {
+        global $wpdb;
+        $raw = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s", self::OPTION ) );
+        $current = wp_parse_args( (array) maybe_unserialize( $raw ), [ 'status'=>'pending', 'phase'=>'roles', 'cursor'=>0, 'updated_at'=>0 ] );
+        if ( $raw === null || $current != $expected ) return false;
+        $saved = $wpdb->query( $wpdb->prepare(
+            "UPDATE {$wpdb->options} SET option_value=%s,autoload='no'
+             WHERE option_name=%s AND BINARY option_value=BINARY %s",
+            maybe_serialize( $next ), self::OPTION, $raw
+        ) );
+        if ( $saved === 1 ) {
+            wp_cache_delete( self::OPTION, 'options' );
+            wp_cache_delete( 'alloptions', 'options' );
+            wp_cache_delete( 'notoptions', 'options' );
+        }
+        return $saved === 1;
     }
 
     private static function next_resources( array &$state ) {

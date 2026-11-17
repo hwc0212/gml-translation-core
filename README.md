@@ -1,5 +1,14 @@
 # GML Translation Core
 
+## 0.9.14 Form UI and inventory recovery (local candidate, 2026-11-17)
+
+- Discover and rebuild textarea UI attributes and input button/reset captions; only unnamed submit captions are translatable. Preserve textarea contents, hidden/user values and named-submit business values.
+- Claim dirty hints atomically before rendering; preserve new edits and failed work. Recover orphaned stale/unknown/render-error manifests from the database using the existing maintenance event. No provider work is started.
+- Persist a backfill wakeup before rendering. Retry failed resources and fence checkpoints against newer pauses/resets.
+- Expose bounded inventory diagnostics and concrete readiness mismatch codes without source text, translation text, lock tokens or remote error messages.
+- No schema, URL, readiness-threshold or translation-data migration. Only GML Translate consumes this candidate; GML SEO remains pinned to its existing Core.
+- Added real database inventory-recovery coverage and optional native CF7 rendering test; see tests/database/form-ui-cf7.php. It requires a separately verified CF7 installation and never submits a form or sends mail.
+
 ## 0.9.13 Snapshot-safe translation deletion
 
 - Add an optional full-row snapshot token to `GML_Translation_Memory::delete_by_id()` and recheck it under the existing translation mutation transaction before deleting.

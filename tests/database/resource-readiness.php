@@ -363,6 +363,9 @@ gml_db_assert( GML_Resource_Readiness::get_status( $external_resource, 'qx' ) ==
 update_option( 'gml_languages', $languages_before_external );
 
 // Backfill lifecycle is explicit, pausable and independent from AI work.
+// Restore the transient renderer failure before draining. Failed discovery
+// now remains pending instead of being silently discarded.
+$GLOBALS['gml_phase2b_http_mode'] = 'success';
 // Real render fixtures enqueue source changes; drain them before testing roles.
 for ($drain=0; $drain<10 && get_option(GML_Resource_Manifest_Manager::DIRTY_OPTION, []); $drain++) GML_Resource_Manifest_Manager::process_dirty();
 gml_db_assert(!get_option(GML_Resource_Manifest_Manager::DIRTY_OPTION, []), 'real render fixture changes finish before role backfill');

@@ -80,6 +80,8 @@ for scenario in resume breaker sample schedule queue-schedule no-key unauthorize
     run_scenario php "$ROOT/crawl.php" "$scenario"
 done
 run_scenario php "$ROOT/incremental-sync.php"
+run_scenario php "$ROOT/inventory-recovery.php"
+expected_scenarios=$((expected_scenarios + 1))
 
 slug="$(basename "$GML_TEST_PRODUCT_DIR")"
 test "$slug" = gml-seo || test "$slug" = gml-translate

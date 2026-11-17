@@ -493,6 +493,21 @@ final class GML_Resource_Readiness {
         return (string) $row->status;
     }
 
+    /** Stable diagnostic codes; never includes source or translated content. */
+    public static function explain_status_row( $row ) {
+        $reasons = [];
+        if ( ( $row->discovery_state ?? 'unknown' ) !== 'complete' ) $reasons[] = 'manifest_' . sanitize_key( $row->discovery_state ?? 'unknown' );
+        $global = (int) ( $row->manifest_global_generation ?? $row->global_generation ?? 0 );
+        if ( $global !== self::global_generation() ) $reasons[] = 'manifest_global_generation_mismatch';
+        if ( ! isset( $row->target_lang ) ) $reasons[] = 'readiness_missing';
+        else {
+            if ( (int) $row->readiness_manifest_generation !== (int) $row->manifest_generation ) $reasons[] = 'readiness_manifest_generation_mismatch';
+            if ( (int) $row->readiness_global_generation !== $global ) $reasons[] = 'readiness_global_generation_mismatch';
+            if ( ( $row->status ?? 'unknown' ) !== 'complete' ) $reasons[] = 'readiness_' . sanitize_key( $row->status ?? 'unknown' );
+        }
+        return $reasons;
+    }
+
     /** Evaluate the discovery half of a manifest/readiness join row. */
     public static function evaluate_manifest_row( $row ) {
         $state = (string) ( $row->discovery_state ?? 'unknown' );
