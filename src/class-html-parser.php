@@ -89,7 +89,7 @@ class GML_HTML_Parser {
 
         // Protect textarea contents before creating inner comment/code tokens.
         // Only the opening tag's UI attributes may be translated.
-        $html = $this->translate_form_ui_attributes( $html, $replacements, $tokenise );
+        $html = $this->translate_tag_attributes( $html, $replacements, $tokenise );
 
         // ── Block-level protection (must run first) ──────────────────────────
 
@@ -193,7 +193,6 @@ class GML_HTML_Parser {
         // This closes the last broad str_replace gap: a visible word such as
         // "div", "main", or "form" must never rewrite an HTML tag name or an
         // unlisted technical attribute that happens to contain the same text.
-        $html = $this->translate_allowed_tag_attributes( $html, $replacements );
         $html = $this->map_html_tags( $html, function( $tag ) use ( $tokenise ) {
             if ( strpos( $tag, '<!--GMLURL_' ) === 0 || strpos( $tag, '<!--GML_NOTRANSLATE_' ) === 0 ) {
                 return $tag;
@@ -315,7 +314,7 @@ class GML_HTML_Parser {
      * all markup is tokenised. Everything else inside a tag remains byte-for-
      * byte unchanged.
      */
-    private function translate_form_ui_attributes( $html, array $replacements, callable $tokenise ) {
+    private function translate_tag_attributes( $html, array $replacements, callable $tokenise ) {
         $stack = [];
         $void_tags = array_merge( $this->skip_tags, [ 'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr', 'textarea' ] );
         $selectors = get_option( 'gml_exclude_selectors', [] );
@@ -353,12 +352,15 @@ class GML_HTML_Parser {
                 if ( $selector[0] === '#' && ( $attributes['id'] ?? '' ) === substr( $selector, 1 ) ) $excluded = true;
             }
             if ( ! in_array( $name_text, $void_tags, true ) ) $stack[] = [ $name_text, $excluded ];
-            if ( $excluded ) return $tag;
-            $allowed = $name_text === 'textarea' ? $this->text_attrs : [];
+            if ( $excluded || in_array( $name_text, $this->skip_tags, true ) ) return $tag;
+            $allowed = $this->text_attrs;
+            if ( $name_text === 'meta' ) {
+                $meta_name = strtolower( ( $attributes['name'] ?? '' ) ?: ( $attributes['property'] ?? '' ) );
+                if ( in_array( $meta_name, $this->seo_meta_names, true ) ) $allowed[] = 'content';
+            }
             if ( $name_text === 'input' && $this->input_has_ui_value( $attributes['type'] ?? '', $attributes['name'] ?? '' ) ) {
                 $allowed[] = 'value';
             }
-            if ( ! $allowed ) return $tag;
             return preg_replace_callback( $pattern, function( $attribute ) use ( $replacements, $allowed ) {
                 if ( ! in_array( strtolower( $attribute[2] ), $allowed, true ) ) return $attribute[0];
                 $raw = $attribute[4] !== null ? $attribute[5] : $attribute[6];
@@ -375,48 +377,6 @@ class GML_HTML_Parser {
         // Named submit values can be successful controls used for routing.
         return in_array( $type, [ 'button', 'reset' ], true )
             || ( $type === 'submit' && $name === '' );
-    }
-
-    private function translate_allowed_tag_attributes( $html, array $replacements ) {
-        return $this->map_html_tags(
-            (string) $html,
-            function( $tag ) use ( $replacements ) {
-                if ( ! preg_match( '/^<[a-zA-Z]/', $tag ) ) {
-                    return $tag;
-                }
-                $tag = preg_replace_callback(
-                    '/(\b(?:alt|placeholder|aria-label|aria-description)\s*=\s*)(["\'])(.*?)\2/si',
-                    function( $attribute ) use ( $replacements ) {
-                        return $attribute[1] . $attribute[2]
-                            . $this->translated_attribute_value( $attribute[3], $replacements )
-                            . $attribute[2];
-                    },
-                    $tag
-                );
-
-                if ( strtolower( substr( $tag, 0, 5 ) ) !== '<meta' ) {
-                    return $tag;
-                }
-                if ( ! preg_match( '/\b(?:name|property)\s*=\s*(["\'])(.*?)\1/i', $tag, $key_match ) ) {
-                    return $tag;
-                }
-                $key = strtolower( html_entity_decode( $key_match[2], ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
-                if ( ! in_array( $key, $this->seo_meta_names, true ) ) {
-                    return $tag;
-                }
-
-                return preg_replace_callback(
-                    '/(\bcontent\s*=\s*)(["\'])(.*?)\2/si',
-                    function( $attribute ) use ( $replacements ) {
-                        return $attribute[1] . $attribute[2]
-                            . $this->translated_attribute_value( $attribute[3], $replacements )
-                            . $attribute[2];
-                    },
-                    $tag,
-                    1
-                );
-            }
-        );
     }
 
     /**
@@ -473,7 +433,11 @@ class GML_HTML_Parser {
             $tag = substr( $html, $start, $end - $start + 1 );
             $mapped_tag = call_user_func( $callback, $tag );
             $offset = $end + 1;
-            if ( preg_match( '~^<(textarea|script|style|code|pre|svg|noscript|iframe)\b~i', $tag, $raw ) ) {
+            if ( preg_match( '~^<svg(?=[\s/>])[\s\S]*?/\s*>$~is', $tag ) ) {
+                $result .= $textarea_callback ? call_user_func( $textarea_callback, [ $tag ] ) : $mapped_tag;
+                continue;
+            }
+            if ( preg_match( '~^<(textarea|script|style|code|pre|svg|noscript|iframe)(?=[\s/>])~i', $tag, $raw ) ) {
                 if ( preg_match( '~</' . $raw[1] . '\s*>~i', $html, $close, PREG_OFFSET_CAPTURE, $offset ) ) {
                     $raw_end = $close[0][1] + strlen( $close[0][0] );
                 } else {
@@ -495,7 +459,7 @@ class GML_HTML_Parser {
         $decoded = html_entity_decode( (string) $raw, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
         $key = array_key_exists( $raw, $replacements )
             ? $raw
-            : ( array_key_exists( $decoded, $replacements ) ? $decoded : null );
+            : ( array_key_exists( trim( $decoded ), $replacements ) ? trim( $decoded ) : null );
         if ( $key === null || trim( (string) $replacements[ $key ] ) === '' ) {
             return $raw;
         }
@@ -503,7 +467,9 @@ class GML_HTML_Parser {
         $translated = GML_Translation_Text::plain_text( (string) $replacements[ $key ] );
         $translated = GML_Translation_Text::clean_markdown_wrappers( $translated );
         $translated = html_entity_decode( trim( $translated ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-        return htmlspecialchars( $translated, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+        $leading = substr( $decoded, 0, strlen( $decoded ) - strlen( ltrim( $decoded ) ) );
+        $trailing = substr( $decoded, strlen( rtrim( $decoded ) ) );
+        return htmlspecialchars( $leading . $translated . $trailing, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
     }
 
     public function verify_brand_protection( $original, $translated ) {

@@ -105,7 +105,9 @@ class GML_Installer {
         wp_clear_scheduled_hook( 'gml_resource_manifest_backfill' );
         wp_clear_scheduled_hook( 'gml_resource_manifest_dirty' );
         wp_clear_scheduled_hook( 'gml_resource_readiness_reverse' );
-        wp_clear_scheduled_hook( 'gml_resource_readiness_rebuild' );
+        foreach ( [ [], [ 'recovery' ], [ 'drain' ], [ 'inventory' ] ] as $args ) {
+            wp_clear_scheduled_hook( 'gml_resource_readiness_rebuild', $args );
+        }
         // NOTE: We intentionally keep gml_crawl_running and gml_crawl_total
         // in the database. WordPress calls deactivate → activate during plugin
         // updates, and clearing these options would silently abort an in-progress
@@ -410,7 +412,8 @@ class GML_Installer {
             'gml_resource_manifest_global_generation',
             'gml_resource_backfill_state',
             'gml_resource_manifest_dirty',
-        'gml_resource_manifest_last_failure',
+            'gml_resource_manifest_last_failure',
+            'gml_inventory_recovery_cursor',
             'gml_resource_readiness_reverse_state',
         ];
         $defaults['gml_resource_manifest_global_generation'] = 1;
@@ -436,7 +439,8 @@ class GML_Installer {
             'gml_resource_manifest_global_generation',
             'gml_resource_backfill_state',
             'gml_resource_manifest_dirty',
-        'gml_resource_manifest_last_failure',
+            'gml_resource_manifest_last_failure',
+            'gml_inventory_recovery_cursor',
             'gml_resource_readiness_reverse_state',
         ];
         if ( function_exists( 'wp_set_option_autoload_values' ) ) {

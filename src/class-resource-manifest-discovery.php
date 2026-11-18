@@ -31,6 +31,8 @@ final class GML_Resource_Manifest_Discovery {
             return new WP_Error( 'gml_resource_excluded', 'Resource is excluded from manifest discovery.' );
         }
         $generation = GML_Resource_Manifest_Manager::global_generation();
+        $before = GML_Resource_Manifest_Store::get_by_key( $resource->get_key() );
+        $revision = (string) ( $before->source_revision ?? '' );
         $html = $this->renderer->render( $resource );
         if ( $generation !== GML_Resource_Manifest_Manager::global_generation() ) {
             GML_Resource_Manifest_Store::mark_stale( $resource, $resource->get_source_revision() );
@@ -50,7 +52,7 @@ final class GML_Resource_Manifest_Discovery {
             return $html;
         }
         $parsed = $this->parser->parse( $html );
-        $saved = GML_Resource_Manifest_Store::save_complete( $current, (array) ( $parsed['nodes'] ?? [] ) );
+        $saved = GML_Resource_Manifest_Store::save_complete( $current, (array) ( $parsed['nodes'] ?? [] ), $revision, $generation );
         if ( $saved !== true || $queue_language === '' ) return $saved;
         require_once __DIR__ . '/class-translator.php';
         $parsed['resource']=$current;

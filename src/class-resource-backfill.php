@@ -40,11 +40,6 @@ final class GML_Resource_Backfill {
     public static function run_batch() {
         $state = self::state();
         if ( $state['status'] === 'paused' || $state['status'] === 'complete' || ! GML_Resource_Manifest_Store::tables_ready() ) return;
-        if ( get_option( GML_Resource_Manifest_Manager::DIRTY_OPTION, [] ) ) {
-            GML_Resource_Manifest_Manager::process_dirty();
-            self::maybe_schedule();
-            return;
-        }
         self::maybe_schedule(); // A process exit must not consume the only wakeup.
         $token = GML_Atomic_Option_Lock::acquire( self::LOCK, 180 );
         if ( $token === '' ) { self::maybe_schedule(); return; }
@@ -57,9 +52,12 @@ final class GML_Resource_Backfill {
             if ( ! self::checkpoint( $state, $running ) && self::state() !== $running ) return;
             $state = $running;
             $resources = self::next_resources( $state );
+            if ( $resources === null ) return; // Database error: retry from the saved checkpoint.
             $discovery = new GML_Resource_Manifest_Discovery();
             foreach ( $resources as $resource ) {
                 if ( ! GML_Atomic_Option_Lock::refresh( self::LOCK, $token, 180 ) ) return;
+                // The dirty event owns these resources (including backoff).
+                if ( in_array( $resource->get_key(), (array) get_option( GML_Resource_Manifest_Manager::DIRTY_OPTION, [] ), true ) ) continue;
                 $result = $discovery->discover( $resource );
                 if ( $result !== true ) {
                     $row = GML_Resource_Manifest_Store::get_by_key( $resource->get_key() );
@@ -114,6 +112,7 @@ final class GML_Resource_Backfill {
                 "SELECT ID FROM {$wpdb->posts} WHERE post_status='publish' AND post_type IN ($type_sql) AND ID>%d ORDER BY ID ASC LIMIT %d",
                 $args
             ) ) : [];
+            if ( $types && $wpdb->last_error !== '' ) return null;
             $ids = array_values( array_filter( array_map( 'intval', $ids ) ) );
             if ( $ids ) { $state['cursor'] = max( $ids ); return array_values( array_filter( array_map( [ 'GML_Resource_Identity', 'for_post' ], $ids ) ) ); }
             $state['phase'] = 'terms'; $state['cursor'] = 0;
@@ -127,6 +126,7 @@ final class GML_Resource_Backfill {
                 "SELECT term_id,taxonomy FROM {$wpdb->term_taxonomy} WHERE taxonomy IN ($tax_sql) AND term_id>%d ORDER BY term_id ASC LIMIT %d",
                 $args
             ) ) : [];
+            if ( $taxonomies && $wpdb->last_error !== '' ) return null;
             if ( $rows ) {
                 $state['cursor'] = max( array_map( static function( $row ) { return (int) $row->term_id; }, $rows ) );
                 $terms = array_map( static function( $row ) { return get_term( (int) $row->term_id, $row->taxonomy ); }, $rows );
