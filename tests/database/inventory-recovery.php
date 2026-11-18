@@ -77,6 +77,45 @@ GML_Resource_Manifest_Manager::add_dirty( $draft_key );
 GML_Resource_Manifest_Manager::process_dirty();
 gml_db_assert( ! in_array( $draft_key, (array)get_option(GML_Resource_Manifest_Manager::DIRTY_OPTION), true ), 'pre-upgrade unpublished hint retires' );
 wp_delete_post( $draft, true );
+$redirect_renderer = new class( $id ) {
+    private $id;
+    private $destination;
+    public function __construct( $id ) {
+        $this->id = $id;
+        $this->destination = home_url( '/destination/' );
+    }
+    public function render( $resource ) {
+        update_post_meta( $this->id, '_seopress_titles_desc', 'A changed source description.' );
+        return new WP_Error( 'gml_resource_permanent_redirect', 'Old redirect', [
+            'destination' => $this->destination,
+            'chain' => [ $resource->get_source_url(), $this->destination ],
+        ] );
+    }
+};
+$redirect = ( new GML_Resource_Manifest_Discovery( $redirect_renderer ) )->discover( $key );
+gml_db_assert( is_wp_error( $redirect ) && $redirect->get_error_code() === 'gml_resource_changed', 'superseded redirect proof is rejected' );
+gml_db_assert( GML_Resource_Manifest_Store::get_by_key($key)->discovery_state === 'stale', 'old redirect cannot overwrite newer stale state' );
+update_post_meta( $id, '_seopress_titles_desc', 'A source description.' );
+GML_Resource_Manifest_Manager::process_dirty();
+
+// A tick with only delayed work should leave the queue untouched and sleep
+// until retry is due. A subsequent edit must wake that worker earlier.
+$retry_after = time() + 600;
+delete_option( GML_Resource_Manifest_Manager::DIRTY_OPTION );
+GML_Resource_Manifest_Manager::add_dirty( $key );
+set_transient( 'gml_manifest_retry_' . md5( $key ), [ 'attempt'=>4, 'after'=>$retry_after ], DAY_IN_SECONDS );
+wp_clear_scheduled_hook( GML_Resource_Manifest_Manager::DIRTY_HOOK );
+$request_count = count($requests);
+GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert( count($requests) === $request_count && wp_next_scheduled(GML_Resource_Manifest_Manager::DIRTY_HOOK) === $retry_after, 'a cooldown-only queue sleeps until the earliest retry' );
+$wake = wp_insert_post( ['post_type'=>'page', 'post_status'=>'publish', 'post_title'=>'Ready behind cooldown'] );
+$wake_key = GML_Resource_Identity::for_post($wake)->get_key();
+gml_db_assert( wp_next_scheduled(GML_Resource_Manifest_Manager::DIRTY_HOOK) < $retry_after, 'new work advances the worker wakeup' );
+GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert( GML_Resource_Manifest_Store::get_by_key($wake_key)->discovery_state === 'complete', 'ready work passes a delayed resource' );
+delete_transient( 'gml_manifest_retry_' . md5( $key ) );
+wp_delete_post( $wake, true );
+GML_Resource_Manifest_Manager::process_dirty();
 $second=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_title'=>'Another changed source']);
 $other=GML_Resource_Identity::for_post($second)->get_key();
 delete_option(GML_Resource_Manifest_Manager::DIRTY_OPTION);

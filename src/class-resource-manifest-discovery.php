@@ -13,6 +13,7 @@ final class GML_Resource_Manifest_Discovery {
 
     /** Optional target explicitly bridges authoritative discovery to the queue. */
     public function discover( $subject, $queue_language = '' ) {
+        global $wpdb;
         if ( $queue_language !== '' ) {
             $queue_language = GML_Language_Utils::normalize_code( $queue_language );
             $source = GML_Language_Utils::normalize_code( get_option( 'gml_source_lang', 'en' ) );
@@ -32,7 +33,8 @@ final class GML_Resource_Manifest_Discovery {
         }
         $generation = GML_Resource_Manifest_Manager::global_generation();
         $before = GML_Resource_Manifest_Store::get_by_key( $resource->get_key() );
-        $revision = (string) ( $before->source_revision ?? '' );
+        if ( $wpdb->last_error !== '' ) return new WP_Error( 'gml_manifest_read' );
+        $expected = GML_Resource_Manifest_Store::snapshot_version( $before );
         $html = $this->renderer->render( $resource );
         if ( $generation !== GML_Resource_Manifest_Manager::global_generation() ) {
             GML_Resource_Manifest_Store::mark_stale( $resource, $resource->get_source_revision() );
@@ -46,13 +48,13 @@ final class GML_Resource_Manifest_Discovery {
         }
         if ( is_wp_error( $html ) ) {
             if ( $html->get_error_code() === 'gml_resource_permanent_redirect' ) {
-                return GML_Resource_Manifest_Store::record_state( $current, 'permanent_redirect', (array) $html->get_error_data() );
+                return GML_Resource_Manifest_Store::record_state( $current, 'permanent_redirect', (array) $html->get_error_data(), $expected, $generation );
             }
-            GML_Resource_Manifest_Store::record_state( $current, 'render_error' );
-            return $html;
+            $saved = GML_Resource_Manifest_Store::record_state( $current, 'render_error', [], $expected, $generation );
+            return is_wp_error( $saved ) ? $saved : $html;
         }
         $parsed = $this->parser->parse( $html );
-        $saved = GML_Resource_Manifest_Store::save_complete( $current, (array) ( $parsed['nodes'] ?? [] ), $revision, $generation );
+        $saved = GML_Resource_Manifest_Store::save_complete( $current, (array) ( $parsed['nodes'] ?? [] ), $expected, $generation );
         if ( $saved !== true || $queue_language === '' ) return $saved;
         require_once __DIR__ . '/class-translator.php';
         $parsed['resource']=$current;

@@ -186,14 +186,26 @@ final class GML_Resource_Manifest_Manager {
         return false;
     }
 
-    private static function schedule_dirty() {
-        if ( ! wp_next_scheduled( self::DIRTY_HOOK ) ) wp_schedule_single_event( time() + 30, self::DIRTY_HOOK );
+    private static function schedule_dirty( $when = null ) {
+        $when = $when ?? time() + 30;
+        $next = wp_next_scheduled( self::DIRTY_HOOK );
+        // A new edit needs an earlier wakeup than a resource in backoff.
+        if ( $next && $next > $when ) {
+            if ( ! wp_unschedule_event( $next, self::DIRTY_HOOK ) ) return;
+            $next = false;
+        }
+        if ( ! $next ) wp_schedule_single_event( $when, self::DIRTY_HOOK );
     }
 
     /** Recover work lost by an interrupted or older worker, without AI work. */
     public static function recover_pending( $mode = 'recovery' ) {
         if ( ! in_array( $mode, [ 'recovery', 'inventory' ], true ) || ! GML_Resource_Manifest_Store::tables_ready() ) return;
         global $wpdb;
+        $dirty = array_fill_keys( (array) get_option( self::DIRTY_OPTION, [] ), true );
+        if ( count( $dirty ) > 200 - GML_Resource_Backfill::BATCH ) {
+            self::schedule_inventory();
+            return;
+        }
         $cursor = (int) get_option( self::RECOVERY_CURSOR, 0 );
         $manifests = GML_Resource_Manifest_Store::manifest_table();
         $readiness = GML_Resource_Manifest_Store::readiness_table();
@@ -210,7 +222,10 @@ final class GML_Resource_Manifest_Manager {
              FROM $manifests m WHERE m.id>%d ORDER BY m.id LIMIT %d",
             array_merge( $languages, [ $cursor, self::RECOVERY_PAGE ] )
         ) );
-        if ( $wpdb->last_error !== '' ) return;
+        if ( $wpdb->last_error !== '' ) {
+            self::schedule_inventory();
+            return;
+        }
         $global = self::global_generation();
         $queued = 0;
         foreach ( $rows as $row ) {
@@ -218,8 +233,11 @@ final class GML_Resource_Manifest_Manager {
             $outdated = $row->discovery_state === 'complete' && (
                 (int) $row->global_generation !== $global || (int) $row->matching_languages !== count( $languages )
             );
-            if ( $incomplete || $outdated ) {
-                if ( ! self::add_dirty( $row->resource_key ) ) return;
+            if ( ( $incomplete || $outdated ) && ! isset( $dirty[ $row->resource_key ] ) ) {
+                if ( ! self::add_dirty( $row->resource_key ) ) {
+                    self::schedule_inventory();
+                    return;
+                }
                 $queued++;
             }
             $cursor = (int) $row->id;
@@ -262,25 +280,39 @@ final class GML_Resource_Manifest_Manager {
         if ( ! get_option( self::DIRTY_OPTION, [] ) ) return;
         // Persist the wakeup before claiming. A killed worker leaves stale
         // manifests that the next event can reconstruct into dirty hints.
-        self::schedule_dirty();
         $token = GML_Atomic_Option_Lock::acquire( GML_Resource_Backfill::LOCK, 180 );
-        if ( $token === '' ) return;
+        if ( $token === '' ) {
+            self::schedule_dirty();
+            return;
+        }
         $batch = [];
         try {
-            if ( ! self::mutate_dirty( static function( $dirty ) use ( &$batch ) {
-                $batch = array_slice( $dirty, 0, GML_Resource_Backfill::BATCH );
-                return array_slice( $dirty, count( $batch ) );
+            $retries = [];
+            $next_retry = null;
+            foreach ( (array) get_option( self::DIRTY_OPTION, [] ) as $key ) {
+                $retry = (array) get_transient( 'gml_manifest_retry_' . md5( $key ) );
+                $after = (int) ( $retry['after'] ?? 0 );
+                if ( $after > time() ) {
+                    $next_retry = $next_retry === null ? $after : min( $next_retry, $after );
+                    continue;
+                }
+                $retries[ $key ] = $retry;
+                if ( count( $retries ) === GML_Resource_Backfill::BATCH ) break;
+            }
+            if ( ! $retries ) {
+                if ( $next_retry !== null ) self::schedule_dirty( $next_retry );
+                return;
+            }
+            self::schedule_dirty();
+            if ( ! self::mutate_dirty( static function( $dirty ) use ( $retries, &$batch ) {
+                $batch = array_values( array_intersect( array_keys( $retries ), $dirty ) );
+                return array_values( array_diff( $dirty, $batch ) );
             } ) ) return;
             $discovery = new GML_Resource_Manifest_Discovery();
             foreach ( $batch as $key ) {
                 if ( ! GML_Atomic_Option_Lock::refresh( GML_Resource_Backfill::LOCK, $token, 180 ) ) break;
                 $retry_key = 'gml_manifest_retry_' . md5( $key );
-                $retry = (array) get_transient( $retry_key );
-                if ( (int) ( $retry['after'] ?? 0 ) > time() ) {
-                    self::add_dirty( $key );
-                    array_shift( $batch );
-                    continue;
-                }
+                $retry = $retries[ $key ];
                 $result = $discovery->discover( $key );
                 $row = GML_Resource_Manifest_Store::get_by_key( $key );
                 $terminal = $row && in_array( $row->discovery_state, [ 'excluded', 'permanent_redirect' ], true );
