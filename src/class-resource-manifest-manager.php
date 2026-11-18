@@ -246,7 +246,19 @@ final class GML_Resource_Manifest_Manager {
     }
 
     public static function process_dirty() {
-        if ( ! get_option( self::DIRTY_OPTION, [] ) ) self::recover_pending();
+        if ( ! get_option( self::DIRTY_OPTION, [] ) ) {
+            // Prefer interrupted work for the active generation. The periodic
+            // cursor independently covers older generations and partial writes.
+            global $wpdb;
+            if ( ! GML_Resource_Manifest_Store::tables_ready() ) return;
+            $table = GML_Resource_Manifest_Store::manifest_table();
+            $keys = $wpdb->get_col( $wpdb->prepare(
+                "SELECT resource_key FROM $table WHERE discovery_state IN ('stale','unknown','render_error')
+                 AND global_generation=%d ORDER BY updated_at,id LIMIT %d",
+                self::global_generation(), GML_Resource_Backfill::BATCH
+            ) );
+            foreach ( (array) $keys as $key ) self::add_dirty( $key );
+        }
         if ( ! get_option( self::DIRTY_OPTION, [] ) ) return;
         // Persist the wakeup before claiming. A killed worker leaves stale
         // manifests that the next event can reconstruct into dirty hints.
