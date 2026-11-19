@@ -172,6 +172,13 @@ final class GML_Resource_Readiness {
                 ];
                 if ( false === $wpdb->query( 'START TRANSACTION' ) ) return $written;
                 try {
+                    $current_manifest = $wpdb->get_row( $wpdb->prepare(
+                        "SELECT * FROM $manifests WHERE id=%d FOR UPDATE", $manifest->id
+                    ) );
+                    if ( $wpdb->last_error !== '' || GML_Resource_Manifest_Store::snapshot_version( $current_manifest ) !== GML_Resource_Manifest_Store::snapshot_version( $manifest ) ) {
+                        $wpdb->query( 'ROLLBACK' );
+                        return $written;
+                    }
                     $old = $wpdb->get_row( $wpdb->prepare("SELECT * FROM $readiness WHERE resource_id=%d AND target_lang=%s FOR UPDATE", $manifest->id, $lang), ARRAY_A );
                     $changed = ! $old;
                     foreach ( $data as $key => $value ) {

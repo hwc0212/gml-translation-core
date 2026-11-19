@@ -1,5 +1,11 @@
 # GML Translation Core
 
+## 0.9.19 Readiness and retry callback fencing (2026-11-19)
+
+- Fence each language readiness write against its manifest snapshot under a row lock.
+- Bind readiness-failure invalidation to the committed source snapshot and propagate superseded-work errors.
+- Bind retry cooldowns to source snapshots so a late failed worker cannot restore an obsolete delay after an edit.
+
 ## 0.9.18 Review corrections (2026-11-19)
 
 - Preserve newer completed manifests when superseded source/global renders return.

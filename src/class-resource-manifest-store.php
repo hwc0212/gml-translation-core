@@ -68,7 +68,8 @@ final class GML_Resource_Manifest_Store {
                 $wpdb->query( 'ROLLBACK' );
                 return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be refreshed.' );
             }
-            if ( ! self::refresh_readiness( $resource, (int) $manifest->id ) ) return new WP_Error( 'gml_readiness_write', 'Resource readiness snapshot could not be completed.' );
+            $readiness = self::refresh_readiness( $resource, (int) $manifest->id, self::snapshot_version( $manifest ) );
+            if ( is_wp_error( $readiness ) ) return $readiness;
             self::clear_language_readiness();
             return true;
         }
@@ -120,18 +121,20 @@ final class GML_Resource_Manifest_Store {
             return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be saved.' );
         }
 
-        if ( ! self::refresh_readiness( $resource, $resource_id ) ) return new WP_Error( 'gml_readiness_write', 'Resource readiness snapshot could not be completed.' );
+        $readiness = self::refresh_readiness( $resource, $resource_id, self::snapshot_version( (object) $data ) );
+        if ( is_wp_error( $readiness ) ) return $readiness;
         self::clear_language_readiness();
         return true;
     }
 
-    private static function refresh_readiness( GML_Resource_Identity $resource, $resource_id ) {
+    private static function refresh_readiness( GML_Resource_Identity $resource, $resource_id, array $expected ) {
         if ( ! class_exists( 'GML_Resource_Readiness' ) || GML_Resource_Readiness::refresh_manifest_snapshot( $resource_id ) ) return true;
         // The manifest committed, but a later language write failed.
         // Keep the resource private and retry; preserve every TM asset.
-        self::mark_stale( $resource );
-        GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
-        return false;
+        $saved = self::record_state( $resource, 'stale', [], $expected, $expected[1] );
+        if ( is_wp_error( $saved ) ) return $saved;
+        if ( $saved === true ) GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
+        return new WP_Error( 'gml_readiness_write', 'Resource readiness snapshot could not be completed.' );
     }
 
     public static function snapshot_version( $manifest ) {

@@ -219,6 +219,77 @@ gml_db_assert(($partial_failure['error_code']??'')==='gml_readiness_write','part
 gml_db_assert(in_array($key,(array)get_option(GML_Resource_Manifest_Manager::DIRTY_OPTION,[]),true),'partial readiness save is not acknowledged as completed work');
 GML_Resource_Manifest_Manager::process_dirty();
 gml_db_assert(GML_Resource_Readiness::get_status($key,'de')==='complete','partial readiness save recovers with existing TM');
+// An older readiness calculation may still be holding pre-render manifest data.
+$ready_transactions=0;
+$newer_between_languages=false;
+$readiness_interleave=static function($sql)use($id,$key,&$ready_transactions,&$newer_between_languages){
+    if(!$newer_between_languages && $sql==='START TRANSACTION' && ++$ready_transactions===3){
+        $newer_between_languages=true;
+        wp_update_post(['ID'=>$id,'post_name'=>'newer-during-readiness-'.$id]);
+        gml_db_assert((new GML_Resource_Manifest_Discovery())->discover($key)===true,'a newer discovery completes between old language snapshot writes');
+    }
+    return $sql;
+};
+add_filter('query',$readiness_interleave);
+$older_readiness=(new GML_Resource_Manifest_Discovery())->discover($key);
+remove_filter('query',$readiness_interleave);
+gml_db_assert($newer_between_languages,'readiness writes were interleaved after the first language');
+$newest_manifest=GML_Resource_Manifest_Store::get_by_key($key);
+$readiness_table=GML_Resource_Manifest_Store::readiness_table();
+$old_snapshot_rows=(int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $readiness_table WHERE resource_id=%d AND manifest_generation<>%d",$newest_manifest->id,$newest_manifest->manifest_generation));
+gml_db_assert($old_snapshot_rows===0,'an older readiness calculation cannot overwrite newer language snapshots');
+gml_db_assert(is_wp_error($older_readiness) && $older_readiness->get_error_code()==='gml_resource_changed','superseded readiness work reports a changed resource');
+
+// A readiness failure must not invalidate a newer manifest completed meanwhile.
+$readiness_failed = false;
+$newer_after_readiness = false;
+$newer_ready_snapshot = null;
+$readiness_fallback = static function($sql) use($id,$key,&$readiness_failed,&$newer_after_readiness,&$newer_ready_snapshot) {
+    if (!$readiness_failed && preg_match('/^REPLACE INTO .?test_gml_resource_readiness/i',$sql)) {
+        $readiness_failed = true;
+        return 'INSERT INTO test_gml_intentionally_missing_table VALUES (1)';
+    }
+    if ($readiness_failed && !$newer_after_readiness
+        && strpos($sql,'SELECT * FROM test_gml_resource_manifests WHERE resource_key=')===0) {
+        $newer_after_readiness = true;
+        wp_update_post(['ID'=>$id,'post_name'=>'newer-after-readiness-'.$id]);
+        gml_db_assert((new GML_Resource_Manifest_Discovery())->discover($key)===true,'a newer discovery completes before the old readiness failure fallback');
+        $newer_ready_snapshot=GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($key));
+    }
+    return $sql;
+};
+add_filter('query',$readiness_fallback);
+$old_suppression=$wpdb->suppress_errors(true);
+$old_readiness_result=(new GML_Resource_Manifest_Discovery())->discover($key);
+$wpdb->suppress_errors($old_suppression);
+remove_filter('query',$readiness_fallback);
+gml_db_assert($readiness_failed && $newer_after_readiness,'readiness failure and newer completion were interleaved');
+gml_db_assert(is_wp_error($old_readiness_result),'the original partial readiness operation reports failure');
+gml_db_assert(GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($key))===$newer_ready_snapshot,'a late readiness failure preserves the newer complete manifest');
+
+// A source edit can also arrive between failure handling and the transient write.
+$retry_key='gml_manifest_retry_'.md5($key);
+GML_Resource_Manifest_Manager::add_dirty($key);
+set_transient($retry_key,['attempt'=>7,'after'=>time()-1,'global_generation'=>GML_Resource_Manifest_Manager::global_generation()],DAY_IN_SECONDS);
+$late_edit=false;
+$retry_write=static function($value)use($id,&$late_edit){
+    if(!$late_edit && is_array($value) && ($value['after']??0)>time()){
+        $late_edit=true;
+        update_post_meta($id,'_seopress_titles_desc','Edited while the failed attempt records its cooldown.');
+    }
+    return $value;
+};
+add_filter('pre_set_transient_'.$retry_key,$retry_write);
+$mode='failure';
+GML_Resource_Manifest_Manager::process_dirty();
+remove_filter('pre_set_transient_'.$retry_key,$retry_write);
+gml_db_assert($late_edit,'a source edit was injected before the old retry transient write');
+$mode='success';$request_count=count($requests);
+GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert(count($requests)>$request_count && GML_Resource_Manifest_Store::get_by_key($key)->discovery_state==='complete','a late retry write cannot restore cooldown after a new source edit');
+update_post_meta($id,'_seopress_titles_desc','A source description.');
+GML_Resource_Manifest_Manager::process_dirty();
+
 GML_Resource_Backfill::reset_pending('pause_during_render');
 delete_option(GML_Resource_Manifest_Manager::DIRTY_OPTION);
 $during_render=static function() { GML_Resource_Backfill::pause(); };

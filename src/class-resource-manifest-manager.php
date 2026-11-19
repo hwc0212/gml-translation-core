@@ -267,10 +267,10 @@ final class GML_Resource_Manifest_Manager {
     }
 
     public static function process_dirty() {
+        global $wpdb;
         if ( ! get_option( self::DIRTY_OPTION, [] ) ) {
             // Prefer interrupted work for the active generation. The periodic
             // cursor independently covers older generations and partial writes.
-            global $wpdb;
             if ( ! GML_Resource_Manifest_Store::tables_ready() ) return;
             $table = GML_Resource_Manifest_Store::manifest_table();
             $keys = $wpdb->get_col( $wpdb->prepare(
@@ -296,11 +296,16 @@ final class GML_Resource_Manifest_Manager {
             foreach ( (array) get_option( self::DIRTY_OPTION, [] ) as $key ) {
                 $retry_key = 'gml_manifest_retry_' . md5( $key );
                 $retry = (array) get_transient( $retry_key );
-                // Older candidates stored no generation. Infer it from their manifest.
-                if ( $retry && ! isset( $retry['global_generation'] ) ) {
+                if ( $retry ) {
                     $manifest = GML_Resource_Manifest_Store::get_by_key( $key );
-                    if ( $manifest ) {
-                        $retry['global_generation'] = (int) $manifest->global_generation;
+                    $snapshot = GML_Resource_Manifest_Store::snapshot_version( $manifest );
+                    if ( $wpdb->last_error === '' && isset( $retry['source_snapshot'] ) && $retry['source_snapshot'] !== $snapshot ) {
+                        delete_transient( $retry_key );
+                        $retry = [];
+                    } elseif ( $manifest && ! isset( $retry['source_snapshot'] ) ) {
+                        // Add snapshot identity to legacy records without shortening a valid delay.
+                        $retry['global_generation'] = $retry['global_generation'] ?? (int) $manifest->global_generation;
+                        $retry['source_snapshot'] = $snapshot;
                         set_transient( $retry_key, $retry, DAY_IN_SECONDS );
                     }
                 }
@@ -340,7 +345,7 @@ final class GML_Resource_Manifest_Manager {
                     $attempt = $source_changed ? 1 : min( 8, 1 + (int) ( $retry['attempt'] ?? 0 ) );
                     // The first retry may run immediately; sustained failures back off.
                     $delay = $attempt === 1 ? 0 : min( HOUR_IN_SECONDS, 30 * ( 2 ** ( $attempt - 1 ) ) );
-                    set_transient( $retry_key, [ 'attempt' => $attempt, 'after' => time() + $delay, 'global_generation' => self::global_generation() ], DAY_IN_SECONDS );
+                    set_transient( $retry_key, [ 'attempt' => $attempt, 'after' => time() + $delay, 'global_generation' => self::global_generation(), 'source_snapshot' => GML_Resource_Manifest_Store::snapshot_version( $row ) ], DAY_IN_SECONDS );
                 } else {
                     if ( $retry ) delete_transient( $retry_key );
                     if ( in_array( $key, (array) get_option( self::DIRTY_OPTION, [] ), true ) ) {
