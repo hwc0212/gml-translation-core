@@ -80,6 +80,25 @@ for scenario in resume breaker sample schedule queue-schedule no-key unauthorize
     run_scenario php "$ROOT/crawl.php" "$scenario"
 done
 run_scenario php "$ROOT/incremental-sync.php"
+run_scenario php "$ROOT/inventory-recovery.php"
+expected_scenarios=$((expected_scenarios + 1))
+for isolation in repeatable committed; do
+    for readiness_case in existing missing; do
+        run_scenario php "$ROOT/readiness-tm-concurrency.php" prepare "$readiness_case" "$isolation"
+        reader_log="$(mktemp)"
+        writer_log="$(mktemp)"
+        php "$ROOT/readiness-tm-concurrency.php" reader "$readiness_case" "$isolation" >"$reader_log" 2>&1 & reader_pid=$!
+        php "$ROOT/readiness-tm-concurrency.php" writer "$readiness_case" "$isolation" >"$writer_log" 2>&1 & writer_pid=$!
+        wait "$reader_pid"
+        wait "$writer_pid"
+        cat "$reader_log" "$writer_log"
+        grep -Fq 'MARKER wordpress_bootstrap_loaded' "$reader_log"
+        grep -Fq 'MARKER wordpress_bootstrap_loaded' "$writer_log"
+        rm -f "$reader_log" "$writer_log"
+        run_scenario php "$ROOT/readiness-tm-concurrency.php" verify "$readiness_case" "$isolation"
+        expected_scenarios=$((expected_scenarios + 2))
+    done
+done
 
 slug="$(basename "$GML_TEST_PRODUCT_DIR")"
 test "$slug" = gml-seo || test "$slug" = gml-translate

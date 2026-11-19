@@ -13,10 +13,12 @@ final class GML_Resource_Manifest_Store {
         return version_compare( get_option( 'gml_db_version', '0' ), '3.4.0', '>=' );
     }
 
-    public static function save_complete( GML_Resource_Identity $resource, array $nodes ) {
+    /** Optional output identifies this attempt even when a write rolls back. */
+    public static function save_complete( GML_Resource_Identity $resource, array $nodes, ?array $expected = null, $scanned_global = null, &$written_snapshot = null ) {
         global $wpdb;
+        $written_snapshot = $expected ?? [];
         if ( ! self::tables_ready() ) return new WP_Error( 'gml_manifest_schema', 'Resource manifest schema is unavailable.' );
-        if ( ! $resource->is_eligible() ) return self::record_state( $resource, 'excluded' );
+        if ( ! $resource->is_eligible() ) return self::record_state( $resource, 'excluded', [], null, null, $written_snapshot );
 
         $strings = [];
         foreach ( $nodes as $node ) {
@@ -39,11 +41,13 @@ final class GML_Resource_Manifest_Store {
         }
         ksort( $strings );
         $fingerprint = hash( 'sha256', wp_json_encode( $strings ) );
-        $manifest = self::get_by_key( $resource->get_key() );
+
         $global = class_exists( 'GML_Resource_Manifest_Manager' ) ? GML_Resource_Manifest_Manager::global_generation() : 1;
         $now = current_time( 'mysql' );
         $manifests = self::manifest_table();
         $relations = self::relation_table();
+        $manifest = self::lock_current_snapshot( $resource->get_key(), $expected, $scanned_global, $global );
+        if ( is_wp_error( $manifest ) ) return $manifest;
 
         // A repeated authoritative scan of the exact same source snapshot must
         // not revoke a human approval. Real source revisions, manifest content,
@@ -62,15 +66,19 @@ final class GML_Resource_Manifest_Store {
                 'discovery_state' => 'complete', 'updated_at' => $now, 'discovered_at' => $now,
                 'redirect_destination' => null, 'redirect_chain' => null,
             ], [ 'id' => (int) $manifest->id ] );
-            if ( false === $saved ) return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be refreshed.' );
-            if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::recalculate_resources( [ (int) $manifest->id ] );
+            if ( false === $saved || false === $wpdb->query( 'COMMIT' ) ) {
+                $wpdb->query( 'ROLLBACK' );
+                return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be refreshed.' );
+            }
+            $written_snapshot = self::snapshot_version( $manifest );
+            $readiness = self::refresh_readiness( $resource, (int) $manifest->id, $written_snapshot, $written_snapshot );
+            if ( is_wp_error( $readiness ) ) return $readiness;
             self::clear_language_readiness();
             return true;
         }
 
         $generation = $manifest ? (int) $manifest->manifest_generation + 1 : 1;
 
-        $wpdb->query( 'START TRANSACTION' );
         try {
             $data = [
                 'resource_key' => $resource->get_key(), 'resource_type' => $resource->get_type(),
@@ -109,30 +117,71 @@ final class GML_Resource_Manifest_Store {
                 }
             }
             if (!GML_Page_Cache::remember_cluster($resource_id, $resource) || !GML_Page_Cache::invalidate_resources([$resource_id])) throw new RuntimeException('cluster_cache_failed');
-            $wpdb->query( 'COMMIT' );
+            if ( false === $wpdb->query( 'COMMIT' ) ) throw new RuntimeException( 'manifest_commit_failed' );
         } catch ( Throwable $error ) {
             $wpdb->query( 'ROLLBACK' );
-            self::record_state( $resource, 'render_error' );
+            self::record_state( $resource, 'render_error', [], $expected, $scanned_global, $written_snapshot );
             return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be saved.' );
         }
 
-        if ( class_exists( 'GML_Resource_Readiness' ) ) GML_Resource_Readiness::recalculate_resources( [ $resource_id ] );
+        $written_snapshot = self::snapshot_version( (object) $data );
+        $readiness = self::refresh_readiness( $resource, $resource_id, $written_snapshot, $written_snapshot );
+        if ( is_wp_error( $readiness ) ) return $readiness;
         self::clear_language_readiness();
         return true;
     }
 
-    public static function record_state( GML_Resource_Identity $resource, $state, array $redirect = [] ) {
+    private static function refresh_readiness( GML_Resource_Identity $resource, $resource_id, array $expected, &$written_snapshot ) {
+        if ( ! class_exists( 'GML_Resource_Readiness' ) || GML_Resource_Readiness::refresh_manifest_snapshot( $resource_id ) ) return true;
+        // The manifest committed, but a later language write failed.
+        // Keep the resource private and retry; preserve every TM asset.
+        $saved = self::record_state( $resource, 'stale', [], $expected, $expected[1], $written_snapshot );
+        if ( is_wp_error( $saved ) && $saved->get_error_code() === 'gml_resource_changed' ) return $saved;
+        GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
+        if ( is_wp_error( $saved ) ) return $saved;
+        return new WP_Error( 'gml_readiness_write', 'Resource readiness snapshot could not be completed.' );
+    }
+
+    public static function snapshot_version( $manifest ) {
+        if ( ! $manifest ) return [];
+        return [ (int) $manifest->manifest_generation, (int) $manifest->global_generation,
+            (string) $manifest->discovery_state, (string) $manifest->source_revision ];
+    }
+
+    /** Begin a write only if the rendered resource still matches its starting snapshot. */
+    private static function lock_current_snapshot( $key, ?array $expected, $scanned_global, $global ) {
         global $wpdb;
+        if ( false === $wpdb->query( 'START TRANSACTION' ) ) return new WP_Error( 'gml_manifest_write' );
+        $table = self::manifest_table();
+        $row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE resource_key=%s FOR UPDATE", $key ) );
+        if ( $wpdb->last_error !== '' ) {
+            $wpdb->query( 'ROLLBACK' );
+            return new WP_Error( 'gml_manifest_write' );
+        }
+        if ( ( $expected !== null && self::snapshot_version( $row ) !== $expected )
+            || ( $scanned_global !== null && $global !== $scanned_global ) ) {
+            $wpdb->query( 'ROLLBACK' );
+            return new WP_Error( 'gml_resource_changed', 'Source invalidated during discovery.' );
+        }
+        return $row;
+    }
+
+    /** Return the committed tuple, or the attempted baseline on failure. */
+    public static function record_state( GML_Resource_Identity $resource, $state, array $redirect = [], ?array $expected = null, $scanned_global = null, &$written_snapshot = null ) {
+        global $wpdb;
+        $written_snapshot = $expected ?? [];
         if ( ! self::tables_ready() ) return new WP_Error( 'gml_manifest_schema', 'Resource manifest schema is unavailable.' );
         $state = in_array( $state, [ 'unknown', 'stale', 'excluded', 'render_error', 'external_unverified', 'permanent_redirect' ], true ) ? $state : 'unknown';
         if ( $state === 'permanent_redirect' && ( empty($redirect['destination']) || empty($redirect['chain']) || count($redirect['chain']) < 2 || count($redirect['chain']) > 4 ) ) return false;
-        $existing = self::get_by_key( $resource->get_key() );
+        $global = GML_Resource_Manifest_Manager::global_generation();
+        $existing = self::lock_current_snapshot( $resource->get_key(), $expected, $scanned_global, $global );
+        if ( is_wp_error( $existing ) ) return $expected === null ? false : $existing;
         $now = current_time( 'mysql' );
         $data = [
             'resource_type' => $resource->get_type(), 'object_id' => $resource->get_object_id(),
             'taxonomy' => $resource->get_taxonomy(), 'variant' => $resource->get_variant(),
             'source_url_hash' => $resource->get_source_url_hash(), 'source_revision' => $resource->get_source_revision(),
-            'global_generation' => class_exists( 'GML_Resource_Manifest_Manager' ) ? GML_Resource_Manifest_Manager::global_generation() : 1,
+            'global_generation' => $global,
             'discovery_state' => $state, 'updated_at' => $now,
             // A failed recheck does not prove the old source is public again.
             // Retained hints exclude it, but only the state certifies the corpus.
@@ -146,7 +195,6 @@ final class GML_Resource_Manifest_Store {
                 'required_count' => 0, 'critical_count' => 0, 'discovered_at' => $now,
             ];
         }
-        if (false === $wpdb->query('START TRANSACTION')) return false;
         try {
             if ($existing) {
                 $saved = $wpdb->update(self::manifest_table(), $data, ['id'=>(int)$existing->id]);
@@ -164,6 +212,7 @@ final class GML_Resource_Manifest_Store {
             $wpdb->query('ROLLBACK');
             return false;
         }
+        $written_snapshot = self::snapshot_version( (object) array_merge( $existing ? (array) $existing : [], $data ) );
         self::clear_language_readiness();
         return true;
     }
@@ -173,11 +222,13 @@ final class GML_Resource_Manifest_Store {
         global $wpdb;
         if (!is_string($key) || !self::tables_ready()) return false;
         $row = self::get_by_key($key);
-        if (!$row) return false;
+        if ($wpdb->last_error !== '') return false;
         $retired = false;
         if (preg_match('/^post:([a-z0-9_-]+):(\d+)$/', $key, $m) && post_type_exists($m[1])) {
             $post = get_post((int)$m[2]);
-            $retired = !$post || $post->post_status !== 'publish' || $post->post_type !== $m[1];
+            $type = get_post_type_object($m[1]);
+            $retired = !$post || $post->post_status !== 'publish' || $post->post_type !== $m[1]
+                || empty($type->public) || $m[1] === 'attachment';
         } elseif (preg_match('/^term:([a-z0-9_-]+):(\d+)$/', $key, $m) && taxonomy_exists($m[1])) {
             $term = get_term((int)$m[2], $m[1]);
             $retired = $term === null;
@@ -187,6 +238,7 @@ final class GML_Resource_Manifest_Store {
             $retired = ($current && $current->get_key() !== $key) || ((int)$m[2] > 0 && (!$post || $post->post_status !== 'publish'));
         }
         if (!$retired || $wpdb->last_error !== '') return false;
+        if (!$row) return true; // Pre-upgrade hint for a resource that was never published.
         if (false === $wpdb->query('START TRANSACTION')) return false;
         $saved = $wpdb->update(self::manifest_table(), [
             'discovery_state'=>'excluded', 'updated_at'=>current_time('mysql'),
@@ -209,7 +261,8 @@ final class GML_Resource_Manifest_Store {
         if ( ! $existing ) return self::record_state( $resource, 'stale' );
         if (false === $wpdb->query('START TRANSACTION')) return false;
         $saved = false !== $wpdb->update( self::manifest_table(), [
-            'source_revision' => substr( (string) ( $revision !== '' ? $revision : $resource->get_source_revision() ), 0, 191 ),
+            // Every invalidation must be distinguishable, including metadata-only edits in the same second.
+            'source_revision' => 'stale:' . wp_generate_uuid4(),
             'discovery_state' => 'stale', 'updated_at' => current_time( 'mysql' ),
         ], [ 'id' => (int) $existing->id ] );
         $saved = $saved && GML_Page_Cache::remember_cluster((int)$existing->id, $resource)
@@ -223,7 +276,7 @@ final class GML_Resource_Manifest_Store {
         global $wpdb;
         if ( ! self::tables_ready() || ! is_string( $key ) || $key === '' ) return false;
         $data = [ 'discovery_state' => 'stale', 'updated_at' => current_time( 'mysql' ) ];
-        if ( $revision !== '' ) $data['source_revision'] = substr( (string) $revision, 0, 191 );
+        $data['source_revision'] = 'stale:' . wp_generate_uuid4();
         $existing = self::get_by_key($key);
         if (!$existing || false === $wpdb->query('START TRANSACTION')) return false;
         $resource = GML_Resource_Identity::resolve($key);

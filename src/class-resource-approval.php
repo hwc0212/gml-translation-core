@@ -576,6 +576,7 @@ final class GML_Resource_Approval {
             'variant' => (string) $row->variant,
             'target_lang' => self::normalize_language( $lang ),
             'machine_status' => $machine,
+            'machine_reasons' => GML_Resource_Readiness::explain_status_row( $row ),
             'review_status' => $review_status,
             'decision' => $decision,
             'snapshot_matches' => $snapshot_matches,

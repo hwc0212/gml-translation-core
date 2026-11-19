@@ -15,6 +15,37 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class GML_URL_Helper {
 
+    /** Paths owned by WordPress services or files, collected once per render. */
+    public static function navigation_excluded_paths() {
+        $urls = [];
+        if ( function_exists( 'content_url' ) ) $urls[] = content_url();
+        if ( function_exists( 'includes_url' ) ) $urls[] = includes_url();
+        if ( function_exists( 'admin_url' ) ) $urls[] = admin_url();
+        if ( function_exists( 'rest_url' ) ) $urls[] = rest_url();
+        if ( function_exists( 'wp_get_upload_dir' ) ) {
+            $uploads = wp_get_upload_dir();
+            $urls[] = $uploads['baseurl'] ?? '';
+        }
+        if ( function_exists( 'site_url' ) ) {
+            foreach ( [ 'wp-login.php', 'wp-cron.php', 'wp-json' ] as $endpoint ) {
+                $urls[] = site_url( $endpoint );
+            }
+        }
+        $paths = [];
+        foreach ( $urls as $url ) {
+            $path = self::internal_absolute_path( $url );
+            if ( $path !== null && $path !== '/' ) {
+                $paths[] = rawurldecode( rtrim( strtok( $path, '?#' ), '/' ) );
+            }
+        }
+        return array_values( array_unique( $paths ) );
+    }
+
+    /** Shared with the frontend script so file URLs keep their original bytes. */
+    public static function navigation_file_pattern() {
+        return '\\.(?:avif|bmp|gif|ico|jpe?g|png|svg|tiff?|webp|pdf|zip|7z|gz|rar|tar|css|m?js|woff2?|ttf|otf|eot|mp[34]|m4a|mov|webm|ogg|wav|csv|xlsx?|docx?|pptx?)$';
+    }
+
     public static function get_home_path() {
         $path = wp_parse_url( home_url( '/' ), PHP_URL_PATH );
         if ( ! is_string( $path ) ) {
@@ -194,18 +225,14 @@ class GML_URL_Helper {
     }
 
     public static function to_root_relative_path( $relative_path ) {
-        $parts = wp_parse_url( home_url( '/' . ltrim( $relative_path, '/' ) ) );
+        $url = home_url( '/' . ltrim( $relative_path, '/' ) );
+        $parts = wp_parse_url( $url );
         if ( ! is_array( $parts ) ) {
             return '/';
         }
+        // PHP 7.4 reports null for empty queries/fragments. Keep their delimiters.
         $result = (string) ( $parts['path'] ?? '/' );
-        if ( ! empty( $parts['query'] ) ) {
-            $result .= '?' . $parts['query'];
-        }
-        if ( ! empty( $parts['fragment'] ) ) {
-            $result .= '#' . $parts['fragment'];
-        }
-        return $result !== '' ? $result : '/';
+        return ( $result !== '' ? $result : '/' ) . substr( $url, strcspn( $url, '?#' ) );
     }
 
     /**
@@ -224,7 +251,7 @@ class GML_URL_Helper {
 
         $home = wp_parse_url( home_url( '/' ) );
         $parts = wp_parse_url( $url );
-        if ( ! is_array( $home ) || ! is_array( $parts ) ) {
+        if ( ! is_array( $home ) || ! is_array( $parts ) || isset( $parts['user'] ) || isset( $parts['pass'] ) ) {
             return null;
         }
 
@@ -249,12 +276,7 @@ class GML_URL_Helper {
         if ( $home_path !== '' && $home_path !== '/' && $path !== $home_path && strpos( $path, $home_path . '/' ) !== 0 ) {
             return null;
         }
-        if ( isset( $parts['query'] ) && $parts['query'] !== '' ) {
-            $path .= '?' . $parts['query'];
-        }
-        if ( isset( $parts['fragment'] ) && $parts['fragment'] !== '' ) {
-            $path .= '#' . $parts['fragment'];
-        }
-        return $path;
+        // Preserve suffix bytes even when parse_url() omits empty components.
+        return $path . substr( $url, strcspn( $url, '?#' ) );
     }
 }

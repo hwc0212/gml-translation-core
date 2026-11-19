@@ -240,7 +240,20 @@ final class GML_Resource_Identity {
         $port = isset( $parts['port'] ) ? ':' . (int) $parts['port'] : '';
         $path = '/' . ltrim( (string) ( $parts['path'] ?? '/' ), '/' );
         $path = function_exists( 'user_trailingslashit' ) ? user_trailingslashit( $path ) : trailingslashit( $path );
-        return strtolower( $parts['scheme'] ) . '://' . strtolower( $parts['host'] ) . $port . $path;
+        $canonical = strtolower( $parts['scheme'] ) . '://' . strtolower( $parts['host'] ) . $port . $path;
+        if ( empty( $parts['query'] ) || get_option( 'permalink_structure' ) ) return $canonical;
+        // Plain permalinks encode the resource identity in routing query vars.
+        wp_parse_str( $parts['query'], $params );
+        $keys = [ 'p', 'page_id', 'pagename', 'name', 'post_type', 'cat', 'tag', 'taxonomy', 'term' ];
+        foreach ( get_taxonomies( [ 'public' => true ], 'objects' ) as $taxonomy ) {
+            if ( is_string( $taxonomy->query_var ) ) $keys[] = $taxonomy->query_var;
+        }
+        foreach ( get_post_types( [ 'public' => true ], 'objects' ) as $type ) {
+            if ( is_string( $type->query_var ) ) $keys[] = $type->query_var;
+        }
+        $routing = array_intersect_key( array_filter( $params, 'is_string' ), array_flip( $keys ) );
+        ksort( $routing );
+        return $routing ? $canonical . '?' . http_build_query( $routing, '', '&', PHP_QUERY_RFC3986 ) : $canonical;
     }
 
     public static function source_url_hash( $url ) {

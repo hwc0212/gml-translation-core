@@ -1,5 +1,43 @@
 # GML Translation Core
 
+## 0.9.20 Translation snapshot consistency (2026-11-19)
+
+- Calculate TM fingerprints and readiness counts inside the per-language transaction after locking its current manifest and readiness row.
+- Preserve real TM deletion, operator hold, missing-only insert and human-edit outcomes while readiness work is running.
+- Carry each discovery attempt's starting or committed tuple through its write path so a post-error read cannot bind an old cooldown to a newer source.
+- Retain exponential backoff for unchanged failures, including state-write rollbacks.
+- Drive TM invalidation from materialized hash-related resources and lock M -> R -> S, avoiding language-wide secondary-index lock inversions.
+- Add deterministic interleavings and real two-process deletion races for existing/missing readiness rows under REPEATABLE READ and READ COMMITTED.
+
+## 0.9.19 Readiness and retry callback fencing (2026-11-19)
+
+- Fence each language readiness write against its manifest snapshot under a row lock.
+- Bind readiness-failure invalidation to the committed source snapshot and propagate superseded-work errors.
+- Bind retry cooldowns to source snapshots so a late failed worker cannot restore an obsolete delay after an edit.
+
+## 0.9.18 Review corrections (2026-11-19)
+
+- Preserve newer completed manifests when superseded source/global renders return.
+- Reset inventory cooldowns after source edits and global generation changes, retaining delays for unchanged failures.
+- Classify encoded installation and content paths consistently with the frontend adapter.
+
+## 0.9.17 Navigation URL safety (review candidate, 2026-11-19)
+
+- Preserve WordPress service endpoints, configured content/upload locations, static file links and explicit downloads during HTML navigation rewriting.
+- Respect installation and origin boundaries and existing language prefixes, and preserve URL query strings and fragments through HTML attribute decoding.
+- Export file/path exclusions to the product frontend adapter.
+
+## 0.9.14 Form UI and inventory recovery (local candidate, 2026-11-17)
+
+- Apply HTML quote rules even after literal backslashes, preserving textarea raw contents.
+- Discover and rebuild textarea UI attributes and input button/reset captions; only unnamed submit captions are translatable. Preserve textarea contents, hidden/user values and named-submit business values.
+- Claim dirty hints atomically before rendering; preserve new edits and failed work. Recover orphaned stale/unknown/render-error manifests from the database using the existing maintenance event. No provider work is started.
+- A manifest is acknowledged only after all configured readiness rows are saved. Partial writes keep it private and retryable without changing TM.
+- Persist a backfill wakeup before rendering. Retry failed resources and fence checkpoints against newer pauses/resets.
+- Expose bounded inventory diagnostics and concrete readiness mismatch codes without source text, translation text, lock tokens or remote error messages.
+- No schema, URL, readiness-threshold or translation-data migration. Only GML Translate consumes this candidate; GML SEO remains pinned to its existing Core.
+- Added real database inventory-recovery coverage and optional native CF7 rendering test; see tests/database/form-ui-cf7.php. It requires a separately verified CF7 installation and never submits a form or sends mail.
+
 ## 0.9.13 Snapshot-safe translation deletion
 
 - Add an optional full-row snapshot token to `GML_Translation_Memory::delete_by_id()` and recheck it under the existing translation mutation transaction before deleting.

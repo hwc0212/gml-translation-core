@@ -33,6 +33,7 @@ final class GML_Translation_Uninstaller {
         'gml_discover_changed_content',
         'gml_resource_manifest_backfill',
         'gml_resource_manifest_dirty',
+        'gml_resource_manifest_last_failure',
         'gml_resource_readiness_reverse',
         'gml_resource_readiness_rebuild',
         'gml_resource_cache_consume',
