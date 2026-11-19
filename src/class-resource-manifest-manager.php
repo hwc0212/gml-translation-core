@@ -45,6 +45,7 @@ final class GML_Resource_Manifest_Manager {
         if (!GML_Page_Cache::invalidate_all_clusters()) { self::$global_bumped = false; return false; }
         update_option( self::GLOBAL_OPTION, self::global_generation() + 1, false );
         GML_Resource_Backfill::reset_pending( sanitize_key( $reason ) );
+        if ( get_option( self::DIRTY_OPTION, [] ) ) self::schedule_dirty();
         self::maybe_schedule();
         return true;
     }
@@ -295,6 +296,14 @@ final class GML_Resource_Manifest_Manager {
             foreach ( (array) get_option( self::DIRTY_OPTION, [] ) as $key ) {
                 $retry_key = 'gml_manifest_retry_' . md5( $key );
                 $retry = (array) get_transient( $retry_key );
+                // Older candidates stored no generation. Infer it from their manifest.
+                if ( $retry && ! isset( $retry['global_generation'] ) ) {
+                    $manifest = GML_Resource_Manifest_Store::get_by_key( $key );
+                    if ( $manifest ) {
+                        $retry['global_generation'] = (int) $manifest->global_generation;
+                        set_transient( $retry_key, $retry, DAY_IN_SECONDS );
+                    }
+                }
                 if ( isset( $retry['global_generation'] ) && (int) $retry['global_generation'] !== $global ) {
                     delete_transient( $retry_key );
                     $retry = [];

@@ -145,10 +145,21 @@ GML_Resource_Manifest_Manager::process_dirty();
 $retry_generation = GML_Resource_Manifest_Manager::global_generation();
 GML_Resource_Manifest_Manager::add_dirty( $key );
 set_transient( 'gml_manifest_retry_' . md5( $key ), [ 'attempt'=>5, 'after'=>time()+600, 'global_generation'=>$retry_generation ], DAY_IN_SECONDS );
-update_option( GML_Resource_Manifest_Manager::GLOBAL_OPTION, $retry_generation + 1, false );
+wp_clear_scheduled_hook(GML_Resource_Manifest_Manager::DIRTY_HOOK);
+wp_schedule_single_event(time()+600,GML_Resource_Manifest_Manager::DIRTY_HOOK);
+GML_Resource_Manifest_Manager::bump_global_generation('review_global_change');
+gml_db_assert(wp_next_scheduled(GML_Resource_Manifest_Manager::DIRTY_HOOK)<time()+300, 'a global source change advances the delayed inventory worker');
 $request_count = count($requests);
 GML_Resource_Manifest_Manager::process_dirty();
 gml_db_assert( count($requests) > $request_count && GML_Resource_Manifest_Store::get_by_key($key)->discovery_state === 'complete', 'a new global generation bypasses the old retry cooldown' );
+
+// Cooldown records created before generation metadata was added also recover.
+GML_Resource_Manifest_Manager::add_dirty($key);
+set_transient('gml_manifest_retry_' . md5($key), ['attempt'=>5,'after'=>time()+600], DAY_IN_SECONDS);
+update_option(GML_Resource_Manifest_Manager::GLOBAL_OPTION, GML_Resource_Manifest_Manager::global_generation()+1, false);
+$request_count=count($requests);
+GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert(count($requests)>$request_count, 'a legacy cooldown is invalidated when its manifest global generation is obsolete');
 
 // A source change inside a failed attempt must not restore its old delay.
 GML_Resource_Manifest_Manager::add_dirty( $key );
@@ -231,4 +242,6 @@ GML_Resource_Backfill::pause();
 $mode='success';
 wp_delete_post($id,true);wp_delete_post($second,true);
 delete_option(GML_Resource_Manifest_Manager::DIRTY_OPTION);
+gml_db_assert($wpdb->get_results($fixture_sql,ARRAY_A)===$before, 'review regressions preserve every stored fixture translation');
+gml_db_assert((int)$wpdb->get_var("SELECT COUNT(*) FROM $queue")===$queue_before, 'review regressions preserve the paid queue');
 echo "OK inventory recovery, preserved TM, no provider requests\n";
