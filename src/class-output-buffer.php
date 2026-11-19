@@ -581,6 +581,7 @@ class GML_Translation_Output_Buffer {
     protected function rewrite_internal_links( $html ) {
         $home_url    = home_url();
         $home_origin = rtrim( $home_url, '/' );
+        $excluded_paths = GML_URL_Helper::navigation_excluded_paths();
         $prefix      = '/' . $this->target_lang . '/';
 
         // Build language code pattern for detecting existing prefixes.
@@ -598,12 +599,12 @@ class GML_Translation_Output_Buffer {
 
         return $this->map_html_tags(
             $html,
-            function( $tag ) use ( $home_origin, $prefix, $lang_pattern ) {
+            function( $tag ) use ( $home_origin, $prefix, $lang_pattern, $excluded_paths ) {
                 if ( preg_match( '/^<a\b/i', $tag ) ) {
-                    return $this->rewrite_tag_url_attribute( $tag, 'a', 'href', $home_origin, $prefix, $lang_pattern );
+                    return $this->rewrite_tag_url_attribute( $tag, 'a', 'href', $home_origin, $prefix, $lang_pattern, $excluded_paths );
                 }
                 if ( preg_match( '/^<form\b/i', $tag ) ) {
-                    return $this->rewrite_tag_url_attribute( $tag, 'form', 'action', $home_origin, $prefix, $lang_pattern );
+                    return $this->rewrite_tag_url_attribute( $tag, 'form', 'action', $home_origin, $prefix, $lang_pattern, $excluded_paths );
                 }
                 return $tag;
             }
@@ -614,87 +615,55 @@ class GML_Translation_Output_Buffer {
      * Rewrite one URL value; return the original when it is not a safe public
      * link inside this WordPress installation.
      */
-    protected function rewrite_single_url( $url, $home_origin, $prefix, $lang_pattern ) {
-        // Skip empty, anchors, non-http schemes
-        if ( $url === '' || $url[0] === '#' ) {
+    protected function rewrite_single_url( $url, $home_origin, $prefix, $lang_pattern, array $excluded_paths = [] ) {
+        // Path-relative URLs already resolve against the current language page.
+        // Leave ambiguous URL syntax intact instead of changing its destination.
+        if ( $url === '' || preg_match( '/[\x00-\x20\x7f\\\\]/', $url )
+            || preg_match( '#/(?:\.|%2e){1,2}(?:/|[?\#]|$)#i', $url ) ) {
             return $url;
         }
-        if ( preg_match( '/^(mailto:|tel:|javascript:|data:)/i', $url ) ) {
-            return $url;
-        }
-
-        $path = null;
-
         $is_absolute = preg_match( '#^https?://#i', $url ) || strpos( $url, '//' ) === 0;
-        if ( $is_absolute ) {
-            if ( class_exists( 'GML_URL_Helper' ) ) {
-                $path = GML_URL_Helper::internal_absolute_path( $url );
-            } else {
-                $url_parts  = wp_parse_url( $url );
-                $home_parts = wp_parse_url( $home_origin );
-                $path = is_array( $url_parts ) && is_array( $home_parts )
-                    && strtolower( (string) ( $url_parts['host'] ?? '' ) ) === strtolower( (string) ( $home_parts['host'] ?? '' ) )
-                    ? ( $url_parts['path'] ?? '/' )
-                    : null;
-            }
-            if ( $path === null ) {
-                return $url; // external or outside this WordPress installation
-            }
-        } elseif ( $url[0] === '/' ) {
-            $path = $url;
-        } else {
-            return $url; // relative — skip
+        if ( ! $is_absolute && $url[0] !== '/' ) return $url;
+
+        $path = $is_absolute ? GML_URL_Helper::internal_absolute_path( $url ) : $url;
+        if ( $path === null ) return $url;
+
+        $pathname = substr( $path, 0, strcspn( $path, '?#' ) );
+        $home_path = GML_URL_Helper::get_home_path();
+        if ( $home_path !== '' && $pathname !== $home_path && strpos( $pathname, $home_path . '/' ) !== 0 ) return $url;
+
+        // Configured content/upload locations can differ from wp-content.
+        $checked_path = rawurldecode( $pathname );
+        foreach ( $excluded_paths as $excluded ) {
+            if ( strcasecmp( $checked_path, $excluded ) === 0 || stripos( $checked_path, $excluded . '/' ) === 0 ) return $url;
         }
 
-        if ( $path[0] !== '/' ) {
-            $path = '/' . $path;
-        }
-
-        // Work with a path relative to home_url(). This prevents root-relative
-        // links on subdirectory installs becoming /lang/subdirectory/... .
-        if ( class_exists( 'GML_URL_Helper' ) ) {
-            $path = GML_URL_Helper::strip_home_path( $path );
-        }
-
-        // Skip WordPress system paths
-        if ( preg_match( '#^/(wp-admin|wp-login\.php|wp-json|wp-cron|wp-content|wp-includes)(/|$|\?)#i', $path ) ) {
+        $relative = GML_URL_Helper::strip_home_path( $checked_path );
+        if ( preg_match( '#^/(wp-admin|wp-login\.php|wp-json|wp-cron(?:\.php)?|wp-content|wp-includes)(/|$)#i', $relative )
+            || preg_match( '#^/(' . $lang_pattern . ')(/|$)#i', $relative )
+            || preg_match( '#(?:^|/)feed(?:/|$)#i', $relative )
+            || preg_match( '#' . GML_URL_Helper::navigation_file_pattern() . '#i', $relative ) ) {
             return $url;
         }
-
-        // Skip if already has a language prefix
-        if ( preg_match( '#^/(' . $lang_pattern . ')(/|$|\?)#', $path ) ) {
-            return $url;
+        $query = wp_parse_url( $url, PHP_URL_QUERY );
+        $parameters = [];
+        if ( is_string( $query ) ) parse_str( $query, $parameters );
+        foreach ( array_keys( $parameters ) as $name ) {
+            if ( preg_match( '/^(wc-ajax|action|rest_route|feed)$/i', $name ) ) return $url;
         }
 
-        // Skip WooCommerce AJAX / WordPress admin-ajax
-        if ( preg_match( '#[?&](wc-ajax|action)=#i', $url ) ) {
-            return $url;
-        }
-
-        // Skip feed URLs
-        if ( preg_match( '#^/feed(/|$)#i', $path ) || preg_match( '#/feed/?$#i', $path ) ) {
-            return $url;
-        }
-
-        $new_path = $prefix . ltrim( $path, '/' );
-
-        if ( $is_absolute ) {
-            $new_url = home_url( $new_path );
-        } else {
-            $new_url = class_exists( 'GML_URL_Helper' )
-                ? GML_URL_Helper::to_root_relative_path( $new_path )
-                : $new_path;
-        }
-
-        return $new_url;
+        // Carry the original query and fragment through without re-encoding.
+        $new_path = $prefix . ltrim( GML_URL_Helper::strip_home_path( $pathname ), '/' ) . substr( $path, strlen( $pathname ) );
+        return $is_absolute ? home_url( $new_path ) : GML_URL_Helper::to_root_relative_path( $new_path );
     }
 
     /**
      * Scan real attributes outside quoted builder data and replace one URL.
      */
-    protected function rewrite_tag_url_attribute( $tag, $tag_name, $attribute_name, $home_origin, $prefix, $lang_pattern ) {
+    protected function rewrite_tag_url_attribute( $tag, $tag_name, $attribute_name, $home_origin, $prefix, $lang_pattern, array $excluded_paths = [] ) {
         $length = strlen( $tag );
         $cursor = 1 + strlen( $tag_name );
+        $url_range = null;
 
         while ( $cursor < $length ) {
             while ( $cursor < $length && ctype_space( $tag[ $cursor ] ) ) {
@@ -709,6 +678,7 @@ class GML_Translation_Output_Buffer {
                 $cursor++;
             }
             $name = substr( $tag, $name_start, $cursor - $name_start );
+            if ( $tag_name === 'a' && strcasecmp( $name, 'download' ) === 0 ) return $tag;
             while ( $cursor < $length && ctype_space( $tag[ $cursor ] ) ) {
                 $cursor++;
             }
@@ -737,12 +707,8 @@ class GML_Translation_Output_Buffer {
             }
             $value_end = $cursor;
 
-            if ( strcasecmp( $name, $attribute_name ) === 0 ) {
-                $url = substr( $tag, $value_start, $value_end - $value_start );
-                $new_url = $this->rewrite_single_url( $url, $home_origin, $prefix, $lang_pattern );
-                return $new_url === $url
-                    ? $tag
-                    : substr_replace( $tag, $new_url, $value_start, $value_end - $value_start );
+            if ( $url_range === null && strcasecmp( $name, $attribute_name ) === 0 ) {
+                $url_range = [ $value_start, $value_end ];
             }
 
             if ( $quote !== '' && $cursor < $length ) {
@@ -750,7 +716,14 @@ class GML_Translation_Output_Buffer {
             }
         }
 
-        return $tag;
+        if ( $url_range === null ) return $tag;
+        list( $value_start, $value_end ) = $url_range;
+        $url = substr( $tag, $value_start, $value_end - $value_start );
+        $decoded = html_entity_decode( $url, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+        $new_url = $this->rewrite_single_url( $decoded, $home_origin, $prefix, $lang_pattern, $excluded_paths );
+        return $new_url === $decoded
+            ? $tag
+            : substr_replace( $tag, esc_attr( $new_url ), $value_start, $value_end - $value_start );
     }
 
     /**
