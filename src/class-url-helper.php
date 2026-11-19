@@ -225,18 +225,14 @@ class GML_URL_Helper {
     }
 
     public static function to_root_relative_path( $relative_path ) {
-        $parts = wp_parse_url( home_url( '/' . ltrim( $relative_path, '/' ) ) );
+        $url = home_url( '/' . ltrim( $relative_path, '/' ) );
+        $parts = wp_parse_url( $url );
         if ( ! is_array( $parts ) ) {
             return '/';
         }
+        // PHP 7.4 reports null for empty queries/fragments. Keep their delimiters.
         $result = (string) ( $parts['path'] ?? '/' );
-        if ( isset( $parts['query'] ) ) {
-            $result .= '?' . $parts['query'];
-        }
-        if ( isset( $parts['fragment'] ) ) {
-            $result .= '#' . $parts['fragment'];
-        }
-        return $result !== '' ? $result : '/';
+        return ( $result !== '' ? $result : '/' ) . substr( $url, strcspn( $url, '?#' ) );
     }
 
     /**
@@ -280,12 +276,7 @@ class GML_URL_Helper {
         if ( $home_path !== '' && $home_path !== '/' && $path !== $home_path && strpos( $path, $home_path . '/' ) !== 0 ) {
             return null;
         }
-        if ( isset( $parts['query'] ) && $parts['query'] !== '' ) {
-            $path .= '?' . $parts['query'];
-        }
-        if ( isset( $parts['fragment'] ) && $parts['fragment'] !== '' ) {
-            $path .= '#' . $parts['fragment'];
-        }
-        return $path;
+        // Preserve suffix bytes even when parse_url() omits empty components.
+        return $path . substr( $url, strcspn( $url, '?#' ) );
     }
 }
