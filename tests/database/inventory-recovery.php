@@ -312,6 +312,56 @@ GML_Resource_Manifest_Manager::process_dirty();
 
 GML_Resource_Backfill::reset_pending('pause_during_render');
 delete_option(GML_Resource_Manifest_Manager::DIRTY_OPTION);
+
+
+// A rolled-back failure write still belongs to its unchanged starting tuple.
+$mode='failure';
+delete_option(GML_Resource_Manifest_Manager::DIRTY_OPTION);
+GML_Resource_Manifest_Store::mark_stale_by_key($key);
+GML_Resource_Manifest_Manager::add_dirty($key);
+$unchanged_attempt=GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($key));
+set_transient($retry_key,['attempt'=>2,'after'=>0,'global_generation'=>GML_Resource_Manifest_Manager::global_generation(),'source_snapshot'=>$unchanged_attempt],DAY_IN_SECONDS);
+$reject_failure_state=static function($sql){
+    if(strpos(str_replace(chr(96),'',$sql),'UPDATE test_gml_resource_manifests SET')===0 && strpos($sql,"'render_error'")!==false) return 'SELECT * FROM test_gml_intentionally_missing_failure_state';
+    return $sql;
+};
+$quiet=$wpdb->suppress_errors(true);
+add_filter('query',$reject_failure_state);
+GML_Resource_Manifest_Manager::process_dirty();
+remove_filter('query',$reject_failure_state);
+$wpdb->suppress_errors($quiet);
+$continued_backoff=(array)get_transient($retry_key);
+gml_db_assert(($continued_backoff['attempt']??0)===3 && ($continued_backoff['after']??0)>time(),'unchanged write failures continue exponential backoff');
+gml_db_assert(($continued_backoff['source_snapshot']??null)===$unchanged_attempt,'a rolled-back state write returns the original attempt snapshot');
+delete_transient($retry_key);
+$mode='success';
+GML_Resource_Manifest_Manager::process_dirty();
+
+// The result belongs to the attempted snapshot, not a later post-error read.
+$mode='failure';
+GML_Resource_Manifest_Store::mark_stale_by_key($key);
+GML_Resource_Manifest_Manager::add_dirty($key);
+set_transient($retry_key,['attempt'=>5,'after'=>0,'global_generation'=>GML_Resource_Manifest_Manager::global_generation(),'source_snapshot'=>GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($key))],DAY_IN_SECONDS);
+$error_state_written=false;
+$edit_before_result_read=false;
+$result_read_race=static function($sql)use(&$error_state_written,&$edit_before_result_read,$id) {
+    $plain=str_replace(chr(96),'',$sql);
+    if(strpos($plain,'UPDATE test_gml_resource_manifests SET')===0 && strpos($sql,"'render_error'")!==false) $error_state_written=true;
+    if($error_state_written && !$edit_before_result_read && strpos($plain,'SELECT * FROM test_gml_resource_manifests WHERE resource_key=')===0){
+        $edit_before_result_read=true;
+        update_post_meta($id,'_seopress_titles_desc','A source description.   ');
+    }
+    return $sql;
+};
+add_filter('query',$result_read_race);
+GML_Resource_Manifest_Manager::process_dirty();
+remove_filter('query',$result_read_race);
+gml_db_assert($edit_before_result_read,'a source edit commits after failure but before the result manifest read');
+$mode='success';
+$request_count=count($requests);
+GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert(count($requests)>$request_count && GML_Resource_Manifest_Store::get_by_key($key)->discovery_state==='complete','an old failure cannot attach its accumulated delay to a newer source snapshot');
+
 $during_render=static function() { GML_Resource_Backfill::pause(); };
 GML_Resource_Backfill::run_batch();
 gml_db_assert(GML_Resource_Backfill::state()['status']==='paused','concurrent explicit pause survives a backfill checkpoint');
@@ -331,6 +381,79 @@ gml_db_assert(($failure['error_code']??'')==='gml_test_transient','diagnostics p
 gml_db_assert(wp_next_scheduled(GML_Resource_Backfill::HOOK)!==false,'backfill has a persisted recovery wakeup');
 GML_Resource_Backfill::pause();
 $mode='success';
+
+// A source manifest fence alone cannot protect a calculation from newer TM.
+$tm_post = wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_title'=>'TM readiness race']);
+$tm_resource = GML_Resource_Identity::for_post($tm_post);
+$tm_key = $tm_resource->get_key();
+$tm_text = 'Independent readiness race title '.$tm_post;
+$tm_nodes = [['text'=>$tm_text,'hash'=>md5($tm_text),'context_type'=>'seo_title']];
+$attempt_snapshot=[];
+gml_db_assert(GML_Resource_Manifest_Store::save_complete($tm_resource,$tm_nodes,null,null,$attempt_snapshot)===true,'TM race manifest is ready');
+gml_db_assert($attempt_snapshot===GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($tm_key)),'successful save returns its exact committed snapshot');
+gml_db_assert(GML_Translation_Memory::upsert(['source_text'=>$tm_text,'source_lang'=>'en','target_lang'=>'de','translated_text'=>'First reviewed wording','status'=>'manual'])!==false,'TM race has a nonempty translation');
+$tm_manifest = GML_Resource_Manifest_Store::get_by_key($tm_key);
+$tm_id = (int)$wpdb->get_var($wpdb->prepare("SELECT id FROM $index WHERE source_hash=%s AND source_lang='en' AND target_lang='de'",md5($tm_text)));
+GML_Resource_Readiness::recalculate_resources([(int)$tm_manifest->id],['de']);
+$tm_before = GML_Resource_Manifest_Store::snapshot_version($tm_manifest);
+$tm_interleaved = false;
+$tm_race = static function($sql) use(&$tm_interleaved,$tm_id,$tm_key) {
+    if(!$tm_interleaved && $sql==='START TRANSACTION'){
+        $tm_interleaved=true;
+        gml_db_assert(GML_Translation_Memory::delete_by_id($tm_id),'a newer TM deletion commits before the old readiness transaction');
+        gml_db_assert(GML_Resource_Readiness::get_status($tm_key,'de')==='stale','TM deletion durably invalidates readiness');
+    }
+    return $sql;
+};
+add_filter('query',$tm_race);
+GML_Resource_Readiness::recalculate_resources([(int)$tm_manifest->id],['de']);
+remove_filter('query',$tm_race);
+gml_db_assert($tm_interleaved && GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($tm_key))===$tm_before,'the TM race leaves the source snapshot unchanged');
+gml_db_assert(GML_Resource_Readiness::get_status($tm_key,'de')!=='complete','an old calculation cannot restore complete after a committed TM deletion');
+gml_db_assert(!GML_Public_Eligibility::get_status($tm_key,'de')['public_eligible'],'a resource missing its critical translation stays private');
+GML_Resource_Readiness::recalculate_resources([(int)$tm_manifest->id],['de']);
+gml_db_assert(GML_Resource_Readiness::get_status($tm_key,'de')==='incomplete','a fresh calculation records the missing TM entry');
+
+// Reuse the independent resource for insertion, human edit and operator hold.
+foreach(['insert','edit','hold'] as $change){
+    if($change!=='insert'){
+        gml_db_assert(GML_Translation_Memory::upsert(['source_text'=>$tm_text,'source_lang'=>'en','target_lang'=>'de','translated_text'=>'Original automatic wording','status'=>'auto'],false)===true,'TM race automatic fixture restored');
+        $tm_id=(int)$wpdb->get_var($wpdb->prepare("SELECT id FROM $index WHERE source_hash=%s AND target_lang='de'",md5($tm_text)));
+    }
+    GML_Resource_Readiness::recalculate_resources([(int)$tm_manifest->id],['de']);
+    $mutation_done=false;
+    $mutate_before_readiness=static function($sql)use(&$mutation_done,$change,$tm_text,$tm_id){
+        if(!$mutation_done && $sql==='START TRANSACTION'){
+            $mutation_done=true;
+            if($change==='insert'){
+                $result=GML_Translation_Memory::insert_missing_batch([['source_text'=>$tm_text,'source_lang'=>'en','target_lang'=>'de','translated_text'=>'Inserted automatic wording','status'=>'auto']]);
+                gml_db_assert(is_array($result) && $result['inserted']===1,'missing-only TM insertion commits before readiness');
+            }elseif($change==='edit'){
+                gml_db_assert(GML_Translation_Memory::update_by_id($tm_id,'Preserved human wording','manual'),'manual TM edit commits before readiness');
+            }else{
+                $admins=get_users(['role'=>'administrator','number'=>1,'fields'=>'ID']);
+                wp_set_current_user((int)$admins[0]);
+                gml_db_assert(GML_Translation_Memory::hold_auto_by_id($tm_id,GML_Translation_Memory::edit_snapshot($tm_id)),'operator TM hold commits before readiness');
+            }
+        }
+        return $sql;
+    };
+    add_filter('query',$mutate_before_readiness);
+    GML_Resource_Readiness::recalculate_resources([(int)$tm_manifest->id],['de']);
+    remove_filter('query',$mutate_before_readiness);
+    gml_db_assert($mutation_done,'TM mutation was interleaved before readiness');
+    $row=$wpdb->get_row($wpdb->prepare("SELECT * FROM $readiness_table WHERE resource_id=%d AND target_lang='de'",(int)$tm_manifest->id));
+    $current_fingerprint=GML_Translation_Memory::snapshot_fingerprint((int)$tm_manifest->id,(int)$tm_manifest->manifest_generation,'de','en');
+    gml_db_assert($row->translation_fingerprint===$current_fingerprint,'readiness fingerprint matches the latest committed TM after '.$change);
+    gml_db_assert($row->status===($change==='hold'?'incomplete':'complete'),'readiness counts match the latest TM after '.$change);
+    if($change==='edit'){
+        GML_Translation_Memory::upsert(['source_text'=>$tm_text,'source_lang'=>'en','target_lang'=>'de','translated_text'=>'Unwanted automatic overwrite','status'=>'auto']);
+        $manual=GML_Translation_Memory::edit_snapshot($tm_id);
+        gml_db_assert($manual['translated_text']==='Preserved human wording' && $manual['status']==='manual','readiness recovery and later AI preserve the human wording');
+    }
+}
+wp_delete_post($tm_post,true);
+
 wp_delete_post($id,true);wp_delete_post($second,true);
 delete_option(GML_Resource_Manifest_Manager::DIRTY_OPTION);
 gml_db_assert($wpdb->get_results($fixture_sql,ARRAY_A)===$before, 'review regressions preserve every stored fixture translation');

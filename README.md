@@ -1,5 +1,14 @@
 # GML Translation Core
 
+## 0.9.20 Translation snapshot consistency (2026-11-19)
+
+- Calculate TM fingerprints and readiness counts inside the per-language transaction after locking its current manifest and readiness row.
+- Preserve real TM deletion, operator hold, missing-only insert and human-edit outcomes while readiness work is running.
+- Carry each discovery attempt's starting or committed tuple through its write path so a post-error read cannot bind an old cooldown to a newer source.
+- Retain exponential backoff for unchanged failures, including state-write rollbacks.
+- Drive TM invalidation from materialized hash-related resources and lock M -> R -> S, avoiding language-wide secondary-index lock inversions.
+- Add deterministic interleavings and real two-process deletion races for existing/missing readiness rows under REPEATABLE READ and READ COMMITTED.
+
 ## 0.9.19 Readiness and retry callback fencing (2026-11-19)
 
 - Fence each language readiness write against its manifest snapshot under a row lock.

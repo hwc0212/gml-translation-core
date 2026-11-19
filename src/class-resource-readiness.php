@@ -117,59 +117,11 @@ final class GML_Resource_Readiness {
         $index = $wpdb->prefix . 'gml_index';
         $ids = implode( ',', $resource_ids );
         $manifest_rows = $wpdb->get_results( "SELECT * FROM $manifests WHERE id IN ($ids)" );
-        $fingerprint_snapshots = [];
-        foreach ( (array) $manifest_rows as $manifest ) {
-            foreach ( $languages as $lang ) {
-                $lang = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $lang ) : sanitize_key( $lang );
-                if ( $lang !== '' ) $fingerprint_snapshots[] = [
-                    'resource_id' => (int) $manifest->id,
-                    'manifest_generation' => (int) $manifest->manifest_generation,
-                    'target_lang' => $lang,
-                ];
-            }
-        }
-        $fingerprints = self::translation_fingerprints( $fingerprint_snapshots, $source );
         $written = 0;
         foreach ( (array) $manifest_rows as $manifest ) {
             foreach ( $languages as $lang ) {
                 $lang = class_exists( 'GML_Language_Utils' ) ? GML_Language_Utils::normalize_code( $lang ) : sanitize_key( $lang );
                 if ( $lang === '' ) continue;
-                if ( $lang === $source ) {
-                    $translated = (int) $manifest->required_count;
-                    $critical_missing = 0;
-                    $status = self::evaluate_manifest_row( $manifest ) === 'complete' ? 'complete' : self::evaluate_manifest_row( $manifest );
-                } elseif ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $lang ) ) {
-                    $translated = 0;
-                    $critical_missing = (int) $manifest->critical_count;
-                    $status = 'external_unverified';
-                } elseif ( $manifest->discovery_state !== 'complete' || (int) $manifest->global_generation !== self::global_generation() ) {
-                    $translated = 0;
-                    $critical_missing = (int) $manifest->critical_count;
-                    $status = self::evaluate_manifest_row( $manifest );
-                } else {
-                    $counts = $wpdb->get_row( $wpdb->prepare(
-                        "SELECT COUNT(DISTINCT CASE WHEN i.id IS NOT NULL THEN s.source_hash END) AS translated_count,
-                                SUM(CASE WHEN s.critical=1 AND i.id IS NULL THEN 1 ELSE 0 END) AS critical_missing
-                         FROM $relations s LEFT JOIN $index i ON i.source_hash=s.source_hash AND i.source_lang=%s AND i.target_lang=%s AND i.status IN ('auto','manual')
-                         WHERE s.resource_id=%d AND s.manifest_generation=%d",
-                        $source, $lang, (int) $manifest->id, (int) $manifest->manifest_generation
-                    ) );
-                    $translated = (int) ( $counts->translated_count ?? 0 );
-                    $critical_missing = (int) ( $counts->critical_missing ?? 0 );
-                    $required = (int) $manifest->required_count;
-                    $status = $critical_missing === 0 && ( $required === 0 || $translated / $required >= self::COMPLETE_RATIO ) ? 'complete' : 'incomplete';
-                }
-                $translation_fingerprint = (string) ( $fingerprints[ (int) $manifest->id ][ (int) $manifest->manifest_generation ][ $lang ] ?? '' );
-                if ( $lang !== $source && $status === 'complete' && $translation_fingerprint === '' ) $status = 'stale';
-                $data = [
-                    'resource_id' => (int) $manifest->id, 'target_lang' => $lang,
-                    'manifest_generation' => (int) $manifest->manifest_generation,
-                    'global_generation' => (int) $manifest->global_generation,
-                    'required_count' => (int) $manifest->required_count, 'translated_count' => $translated,
-                    'critical_missing_count' => $critical_missing, 'status' => $status,
-                    'translation_fingerprint' => $translation_fingerprint,
-                    'calculated_at' => current_time( 'mysql' ),
-                ];
                 if ( false === $wpdb->query( 'START TRANSACTION' ) ) return $written;
                 try {
                     $current_manifest = $wpdb->get_row( $wpdb->prepare(
@@ -180,6 +132,54 @@ final class GML_Resource_Readiness {
                         return $written;
                     }
                     $old = $wpdb->get_row( $wpdb->prepare("SELECT * FROM $readiness WHERE resource_id=%d AND target_lang=%s FOR UPDATE", $manifest->id, $lang), ARRAY_A );
+                    if ( $wpdb->last_error !== '' ) throw new RuntimeException( 'readiness_lock_failed' );
+                    // The first consistent read starts after the locking reads.
+                    // Counts and fingerprint must describe the same committed TM.
+                    $fingerprints = self::translation_fingerprints( [ [
+                        'resource_id' => (int) $manifest->id,
+                        'manifest_generation' => (int) $manifest->manifest_generation,
+                        'target_lang' => $lang,
+                    ] ], $source );
+                    if ( ! isset( $fingerprints[ (int) $manifest->id ][ (int) $manifest->manifest_generation ][ $lang ] ) ) {
+                        throw new RuntimeException( 'readiness_fingerprint_failed' );
+                    }
+                    if ( $lang === $source ) {
+                        $translated = (int) $manifest->required_count;
+                        $critical_missing = 0;
+                        $status = self::evaluate_manifest_row( $manifest ) === 'complete' ? 'complete' : self::evaluate_manifest_row( $manifest );
+                    } elseif ( class_exists( 'GML_Language_Utils' ) && GML_Language_Utils::is_external_language( $lang ) ) {
+                        $translated = 0;
+                        $critical_missing = (int) $manifest->critical_count;
+                        $status = 'external_unverified';
+                    } elseif ( $manifest->discovery_state !== 'complete' || (int) $manifest->global_generation !== self::global_generation() ) {
+                        $translated = 0;
+                        $critical_missing = (int) $manifest->critical_count;
+                        $status = self::evaluate_manifest_row( $manifest );
+                    } else {
+                        $counts = $wpdb->get_row( $wpdb->prepare(
+                            "SELECT COUNT(DISTINCT CASE WHEN i.id IS NOT NULL THEN s.source_hash END) AS translated_count,
+                                    SUM(CASE WHEN s.critical=1 AND i.id IS NULL THEN 1 ELSE 0 END) AS critical_missing
+                             FROM $relations s LEFT JOIN $index i ON i.source_hash=s.source_hash AND i.source_lang=%s AND i.target_lang=%s AND i.status IN ('auto','manual')
+                             WHERE s.resource_id=%d AND s.manifest_generation=%d",
+                            $source, $lang, (int) $manifest->id, (int) $manifest->manifest_generation
+                        ) );
+                        if ( $wpdb->last_error !== '' || ! $counts ) throw new RuntimeException( 'readiness_count_failed' );
+                        $translated = (int) ( $counts->translated_count ?? 0 );
+                        $critical_missing = (int) ( $counts->critical_missing ?? 0 );
+                        $required = (int) $manifest->required_count;
+                        $status = $critical_missing === 0 && ( $required === 0 || $translated / $required >= self::COMPLETE_RATIO ) ? 'complete' : 'incomplete';
+                    }
+                    $translation_fingerprint = (string) ( $fingerprints[ (int) $manifest->id ][ (int) $manifest->manifest_generation ][ $lang ] ?? '' );
+                    if ( $lang !== $source && $status === 'complete' && $translation_fingerprint === '' ) $status = 'stale';
+                    $data = [
+                        'resource_id' => (int) $manifest->id, 'target_lang' => $lang,
+                        'manifest_generation' => (int) $manifest->manifest_generation,
+                        'global_generation' => (int) $manifest->global_generation,
+                        'required_count' => (int) $manifest->required_count, 'translated_count' => $translated,
+                        'critical_missing_count' => $critical_missing, 'status' => $status,
+                        'translation_fingerprint' => $translation_fingerprint,
+                        'calculated_at' => current_time( 'mysql' ),
+                    ];
                     $changed = ! $old;
                     foreach ( $data as $key => $value ) {
                         if ( $key !== 'calculated_at' && (string) ( $old[$key] ?? '' ) !== (string) $value ) $changed = true;
@@ -290,13 +290,20 @@ final class GML_Resource_Readiness {
             foreach ( $by_language as $target_lang => $hashes ) {
                 $hashes = array_values( array_unique( $hashes ) );
                 $placeholders = implode( ',', array_fill( 0, count( $hashes ), '%s' ) );
-                $query_args = array_merge( [ current_time( 'mysql' ), $target_lang ], $hashes );
+                $query_args = array_merge( $hashes, [ $target_lang ], $hashes, [ current_time( 'mysql' ) ] );
+                // Materialize hash-related IDs before locking M -> R -> S.
+                // A language-index scan can lock unrelated secondary ranges,
+                // then deadlock with readiness REPLACE under the primary lock.
                 $changed = $wpdb->query( $wpdb->prepare(
-                    "UPDATE $readiness r
-                     INNER JOIN $relations s ON s.resource_id=r.resource_id
-                     INNER JOIN $manifests m ON m.id=s.resource_id AND m.manifest_generation=s.manifest_generation
-                     SET r.status='stale',r.calculated_at=%s
-                     WHERE r.target_lang=%s AND s.source_hash IN ($placeholders)",
+                    "UPDATE (SELECT DISTINCT resource_id FROM $relations FORCE INDEX (source_hash)
+                             WHERE source_hash IN ($placeholders) ORDER BY resource_id) affected
+                     STRAIGHT_JOIN $manifests m ON m.id=affected.resource_id
+                     STRAIGHT_JOIN $readiness r FORCE INDEX (resource_language)
+                         ON r.resource_id=m.id AND r.target_lang=%s
+                     STRAIGHT_JOIN $relations s FORCE INDEX (resource_hash)
+                         ON s.resource_id=m.id AND s.manifest_generation=m.manifest_generation
+                         AND s.source_hash IN ($placeholders)
+                     SET r.status='stale',r.calculated_at=%s",
                     $query_args
                 ) );
                 if ( $changed === false ) throw new RuntimeException( 'readiness_invalidation_failed' );

@@ -335,17 +335,21 @@ final class GML_Resource_Manifest_Manager {
                 if ( ! GML_Atomic_Option_Lock::refresh( GML_Resource_Backfill::LOCK, $token, 180 ) ) break;
                 $retry_key = 'gml_manifest_retry_' . md5( $key );
                 $retry = $retries[ $key ];
-                $result = $discovery->discover( $key );
+                $attempt_snapshot = [];
+                $result = $discovery->discover( $key, '', $attempt_snapshot );
                 $row = GML_Resource_Manifest_Store::get_by_key( $key );
                 $terminal = $row && in_array( $row->discovery_state, [ 'excluded', 'permanent_redirect' ], true );
                 if ( $result !== true && ! $terminal ) {
                     self::add_dirty( $key );
                     self::record_failure( $key, $result );
-                    $source_changed = is_wp_error( $result ) && $result->get_error_code() === 'gml_resource_changed';
+                    // Only the tuple returned by the attempted write owns its delay.
+                    // A later read may already belong to a new edit or discovery.
+                    $source_changed = $attempt_snapshot !== GML_Resource_Manifest_Store::snapshot_version( $row )
+                        || ( is_wp_error( $result ) && $result->get_error_code() === 'gml_resource_changed' );
                     $attempt = $source_changed ? 1 : min( 8, 1 + (int) ( $retry['attempt'] ?? 0 ) );
                     // The first retry may run immediately; sustained failures back off.
                     $delay = $attempt === 1 ? 0 : min( HOUR_IN_SECONDS, 30 * ( 2 ** ( $attempt - 1 ) ) );
-                    set_transient( $retry_key, [ 'attempt' => $attempt, 'after' => time() + $delay, 'global_generation' => self::global_generation(), 'source_snapshot' => GML_Resource_Manifest_Store::snapshot_version( $row ) ], DAY_IN_SECONDS );
+                    set_transient( $retry_key, [ 'attempt' => $attempt, 'after' => time() + $delay, 'global_generation' => (int) ( $attempt_snapshot[1] ?? $global ), 'source_snapshot' => $attempt_snapshot ], DAY_IN_SECONDS );
                 } else {
                     if ( $retry ) delete_transient( $retry_key );
                     if ( in_array( $key, (array) get_option( self::DIRTY_OPTION, [] ), true ) ) {

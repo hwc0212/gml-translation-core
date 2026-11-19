@@ -13,10 +13,12 @@ final class GML_Resource_Manifest_Store {
         return version_compare( get_option( 'gml_db_version', '0' ), '3.4.0', '>=' );
     }
 
-    public static function save_complete( GML_Resource_Identity $resource, array $nodes, ?array $expected = null, $scanned_global = null ) {
+    /** Optional output identifies this attempt even when a write rolls back. */
+    public static function save_complete( GML_Resource_Identity $resource, array $nodes, ?array $expected = null, $scanned_global = null, &$written_snapshot = null ) {
         global $wpdb;
+        $written_snapshot = $expected ?? [];
         if ( ! self::tables_ready() ) return new WP_Error( 'gml_manifest_schema', 'Resource manifest schema is unavailable.' );
-        if ( ! $resource->is_eligible() ) return self::record_state( $resource, 'excluded' );
+        if ( ! $resource->is_eligible() ) return self::record_state( $resource, 'excluded', [], null, null, $written_snapshot );
 
         $strings = [];
         foreach ( $nodes as $node ) {
@@ -68,7 +70,8 @@ final class GML_Resource_Manifest_Store {
                 $wpdb->query( 'ROLLBACK' );
                 return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be refreshed.' );
             }
-            $readiness = self::refresh_readiness( $resource, (int) $manifest->id, self::snapshot_version( $manifest ) );
+            $written_snapshot = self::snapshot_version( $manifest );
+            $readiness = self::refresh_readiness( $resource, (int) $manifest->id, $written_snapshot, $written_snapshot );
             if ( is_wp_error( $readiness ) ) return $readiness;
             self::clear_language_readiness();
             return true;
@@ -117,21 +120,22 @@ final class GML_Resource_Manifest_Store {
             if ( false === $wpdb->query( 'COMMIT' ) ) throw new RuntimeException( 'manifest_commit_failed' );
         } catch ( Throwable $error ) {
             $wpdb->query( 'ROLLBACK' );
-            self::record_state( $resource, 'render_error', [], $expected, $scanned_global );
+            self::record_state( $resource, 'render_error', [], $expected, $scanned_global, $written_snapshot );
             return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be saved.' );
         }
 
-        $readiness = self::refresh_readiness( $resource, $resource_id, self::snapshot_version( (object) $data ) );
+        $written_snapshot = self::snapshot_version( (object) $data );
+        $readiness = self::refresh_readiness( $resource, $resource_id, $written_snapshot, $written_snapshot );
         if ( is_wp_error( $readiness ) ) return $readiness;
         self::clear_language_readiness();
         return true;
     }
 
-    private static function refresh_readiness( GML_Resource_Identity $resource, $resource_id, array $expected ) {
+    private static function refresh_readiness( GML_Resource_Identity $resource, $resource_id, array $expected, &$written_snapshot ) {
         if ( ! class_exists( 'GML_Resource_Readiness' ) || GML_Resource_Readiness::refresh_manifest_snapshot( $resource_id ) ) return true;
         // The manifest committed, but a later language write failed.
         // Keep the resource private and retry; preserve every TM asset.
-        $saved = self::record_state( $resource, 'stale', [], $expected, $expected[1] );
+        $saved = self::record_state( $resource, 'stale', [], $expected, $expected[1], $written_snapshot );
         if ( is_wp_error( $saved ) && $saved->get_error_code() === 'gml_resource_changed' ) return $saved;
         GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
         if ( is_wp_error( $saved ) ) return $saved;
@@ -162,8 +166,10 @@ final class GML_Resource_Manifest_Store {
         return $row;
     }
 
-    public static function record_state( GML_Resource_Identity $resource, $state, array $redirect = [], ?array $expected = null, $scanned_global = null ) {
+    /** Return the committed tuple, or the attempted baseline on failure. */
+    public static function record_state( GML_Resource_Identity $resource, $state, array $redirect = [], ?array $expected = null, $scanned_global = null, &$written_snapshot = null ) {
         global $wpdb;
+        $written_snapshot = $expected ?? [];
         if ( ! self::tables_ready() ) return new WP_Error( 'gml_manifest_schema', 'Resource manifest schema is unavailable.' );
         $state = in_array( $state, [ 'unknown', 'stale', 'excluded', 'render_error', 'external_unverified', 'permanent_redirect' ], true ) ? $state : 'unknown';
         if ( $state === 'permanent_redirect' && ( empty($redirect['destination']) || empty($redirect['chain']) || count($redirect['chain']) < 2 || count($redirect['chain']) > 4 ) ) return false;
@@ -206,6 +212,7 @@ final class GML_Resource_Manifest_Store {
             $wpdb->query('ROLLBACK');
             return false;
         }
+        $written_snapshot = self::snapshot_version( (object) array_merge( $existing ? (array) $existing : [], $data ) );
         self::clear_language_readiness();
         return true;
     }
