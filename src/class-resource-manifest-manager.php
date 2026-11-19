@@ -65,6 +65,7 @@ final class GML_Resource_Manifest_Manager {
             return;
         }
         GML_Resource_Manifest_Store::mark_stale( $resource );
+        delete_transient( 'gml_manifest_retry_' . md5( $resource->get_key() ) );
         self::add_dirty( $resource->get_key() );
     }
 
@@ -74,6 +75,7 @@ final class GML_Resource_Manifest_Manager {
         $resource = GML_Resource_Identity::for_term( (int) $term_id, (string) $taxonomy );
         if ( ! $resource ) return;
         GML_Resource_Manifest_Store::mark_stale( $resource );
+        delete_transient( 'gml_manifest_retry_' . md5( $resource->get_key() ) );
         self::add_dirty( $resource->get_key() );
     }
 
@@ -289,8 +291,14 @@ final class GML_Resource_Manifest_Manager {
         try {
             $retries = [];
             $next_retry = null;
+            $global = self::global_generation();
             foreach ( (array) get_option( self::DIRTY_OPTION, [] ) as $key ) {
-                $retry = (array) get_transient( 'gml_manifest_retry_' . md5( $key ) );
+                $retry_key = 'gml_manifest_retry_' . md5( $key );
+                $retry = (array) get_transient( $retry_key );
+                if ( isset( $retry['global_generation'] ) && (int) $retry['global_generation'] !== $global ) {
+                    delete_transient( $retry_key );
+                    $retry = [];
+                }
                 $after = (int) ( $retry['after'] ?? 0 );
                 if ( $after > time() ) {
                     $next_retry = $next_retry === null ? $after : min( $next_retry, $after );
@@ -319,10 +327,11 @@ final class GML_Resource_Manifest_Manager {
                 if ( $result !== true && ! $terminal ) {
                     self::add_dirty( $key );
                     self::record_failure( $key, $result );
-                    $attempt = min( 8, 1 + (int) ( $retry['attempt'] ?? 0 ) );
+                    $source_changed = is_wp_error( $result ) && $result->get_error_code() === 'gml_resource_changed';
+                    $attempt = $source_changed ? 1 : min( 8, 1 + (int) ( $retry['attempt'] ?? 0 ) );
                     // The first retry may run immediately; sustained failures back off.
                     $delay = $attempt === 1 ? 0 : min( HOUR_IN_SECONDS, 30 * ( 2 ** ( $attempt - 1 ) ) );
-                    set_transient( $retry_key, [ 'attempt' => $attempt, 'after' => time() + $delay ], DAY_IN_SECONDS );
+                    set_transient( $retry_key, [ 'attempt' => $attempt, 'after' => time() + $delay, 'global_generation' => self::global_generation() ], DAY_IN_SECONDS );
                 } else {
                     if ( $retry ) delete_transient( $retry_key );
                     if ( in_array( $key, (array) get_option( self::DIRTY_OPTION, [] ), true ) ) {

@@ -98,6 +98,28 @@ gml_db_assert( GML_Resource_Manifest_Store::get_by_key($key)->discovery_state ==
 update_post_meta( $id, '_seopress_titles_desc', 'A source description.' );
 GML_Resource_Manifest_Manager::process_dirty();
 
+// An older render must not invalidate a newer completed discovery.
+$inner_snapshot = null;
+$during_render = static function() use($id,$key,&$inner_snapshot) {
+    update_post_meta($id, '_seopress_titles_desc', 'New source completed by another discovery.');
+    wp_update_post(['ID'=>$id, 'post_name'=>'inventory-newer-source-'.$id]);
+    gml_db_assert((new GML_Resource_Manifest_Discovery())->discover($key) === true, 'a newer source discovery completes while an older render is outstanding');
+    $inner_snapshot = GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($key));
+};
+$superseded = (new GML_Resource_Manifest_Discovery())->discover($key);
+gml_db_assert(is_wp_error($superseded) && $superseded->get_error_code()==='gml_resource_changed', 'an older render reports its superseded source');
+gml_db_assert(GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($key)) === $inner_snapshot, 'an older source render preserves the newer complete manifest');
+
+$inner_snapshot = null;
+$during_render = static function() use($key,&$inner_snapshot) {
+    update_option(GML_Resource_Manifest_Manager::GLOBAL_OPTION, GML_Resource_Manifest_Manager::global_generation()+1, false);
+    gml_db_assert((new GML_Resource_Manifest_Discovery())->discover($key) === true, 'a newer global-generation discovery completes');
+    $inner_snapshot = GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($key));
+};
+$superseded = (new GML_Resource_Manifest_Discovery())->discover($key);
+gml_db_assert(is_wp_error($superseded) && $superseded->get_error_code()==='gml_resource_changed', 'an older render reports its superseded global generation');
+gml_db_assert(GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($key)) === $inner_snapshot, 'an older global render preserves the newer complete manifest');
+
 // A tick with only delayed work should leave the queue untouched and sleep
 // until retry is due. A subsequent edit must wake that worker earlier.
 $retry_after = time() + 600;
@@ -113,6 +135,31 @@ $wake_key = GML_Resource_Identity::for_post($wake)->get_key();
 gml_db_assert( wp_next_scheduled(GML_Resource_Manifest_Manager::DIRTY_HOOK) < $retry_after, 'new work advances the worker wakeup' );
 GML_Resource_Manifest_Manager::process_dirty();
 gml_db_assert( GML_Resource_Manifest_Store::get_by_key($wake_key)->discovery_state === 'complete', 'ready work passes a delayed resource' );
+update_post_meta( $id, '_seopress_titles_desc', 'A revised source during cooldown.' );
+$request_count = count($requests);
+GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert( count($requests) > $request_count && GML_Resource_Manifest_Store::get_by_key($key)->discovery_state === 'complete', 'a same-resource source edit bypasses its old retry cooldown' );
+update_post_meta( $id, '_seopress_titles_desc', 'A source description.' );
+GML_Resource_Manifest_Manager::process_dirty();
+// Global layout edits invalidate the failed render as well.
+$retry_generation = GML_Resource_Manifest_Manager::global_generation();
+GML_Resource_Manifest_Manager::add_dirty( $key );
+set_transient( 'gml_manifest_retry_' . md5( $key ), [ 'attempt'=>5, 'after'=>time()+600, 'global_generation'=>$retry_generation ], DAY_IN_SECONDS );
+update_option( GML_Resource_Manifest_Manager::GLOBAL_OPTION, $retry_generation + 1, false );
+$request_count = count($requests);
+GML_Resource_Manifest_Manager::process_dirty();
+gml_db_assert( count($requests) > $request_count && GML_Resource_Manifest_Store::get_by_key($key)->discovery_state === 'complete', 'a new global generation bypasses the old retry cooldown' );
+
+// A source change inside a failed attempt must not restore its old delay.
+GML_Resource_Manifest_Manager::add_dirty( $key );
+set_transient( 'gml_manifest_retry_' . md5( $key ), [ 'attempt'=>7, 'after'=>time()-1 ], DAY_IN_SECONDS );
+$during_render = static function() use($id) { update_post_meta($id, '_seopress_titles_desc', 'Another source revision.'); };
+GML_Resource_Manifest_Manager::process_dirty();
+$changed_retry = (array)get_transient('gml_manifest_retry_' . md5($key));
+gml_db_assert( (int)($changed_retry['after']??0) <= time() && (int)($changed_retry['attempt']??0) === 1, 'an edit during rendering resets the superseded retry attempt' );
+GML_Resource_Manifest_Manager::process_dirty();
+update_post_meta($id, '_seopress_titles_desc', 'A source description.');
+GML_Resource_Manifest_Manager::process_dirty();
 delete_transient( 'gml_manifest_retry_' . md5( $key ) );
 wp_delete_post( $wake, true );
 GML_Resource_Manifest_Manager::process_dirty();

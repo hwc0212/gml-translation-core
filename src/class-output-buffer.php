@@ -638,7 +638,7 @@ class GML_Translation_Output_Buffer {
             if ( strcasecmp( $checked_path, $excluded ) === 0 || stripos( $checked_path, $excluded . '/' ) === 0 ) return $url;
         }
 
-        $relative = GML_URL_Helper::strip_home_path( $checked_path );
+        $relative = rawurldecode( GML_URL_Helper::strip_home_path( $pathname ) );
         if ( preg_match( '#^/(wp-admin|wp-login\.php|wp-json|wp-cron(?:\.php)?|wp-content|wp-includes)(/|$)#i', $relative )
             || preg_match( '#^/(' . $lang_pattern . ')(/|$)#i', $relative )
             || preg_match( '#(?:^|/)feed(?:/|$)#i', $relative )

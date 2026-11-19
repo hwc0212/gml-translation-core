@@ -1,10 +1,12 @@
 # GML Translation Core
 
-## 0.9.17 Navigation URL safety (local candidate, 2026-11-19)
+## 0.9.17 Navigation URL safety (review candidate, 2026-11-19)
 
 - Preserve WordPress service endpoints, configured content/upload locations, static file links and explicit downloads during HTML navigation rewriting.
 - Respect installation and origin boundaries and existing language prefixes, and preserve URL query strings and fragments through HTML attribute decoding.
 - Export file/path exclusions to the product frontend adapter.
+- Keep encoded installation paths consistent between URL boundary checks and decoded path classification.
+- Fence superseded source/global discovery invalidations and reset inventory cooldowns after new source edits.
 
 ## 0.9.14 Form UI and inventory recovery (local candidate, 2026-11-17)
 

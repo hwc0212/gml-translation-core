@@ -37,13 +37,13 @@ final class GML_Resource_Manifest_Discovery {
         $expected = GML_Resource_Manifest_Store::snapshot_version( $before );
         $html = $this->renderer->render( $resource );
         if ( $generation !== GML_Resource_Manifest_Manager::global_generation() ) {
-            GML_Resource_Manifest_Store::mark_stale( $resource, $resource->get_source_revision() );
+            GML_Resource_Manifest_Store::record_state( $resource, 'stale', [], $expected, $generation );
             return new WP_Error( 'gml_resource_changed', 'Global content changed during authoritative discovery.' );
         }
         $current = in_array($resource->get_type(), ['post','term','role'], true)
             ? GML_Resource_Identity::resolve($resource->get_key()) : GML_Resource_Identity::refresh($resource);
         if ( ! $current instanceof GML_Resource_Identity || $current->get_source_revision() !== $resource->get_source_revision() ) {
-            GML_Resource_Manifest_Store::mark_stale( $resource, $current instanceof GML_Resource_Identity ? $current->get_source_revision() : '' );
+            GML_Resource_Manifest_Store::record_state( $current instanceof GML_Resource_Identity ? $current : $resource, 'stale', [], $expected, $generation );
             return new WP_Error( 'gml_resource_changed', 'Resource changed during authoritative discovery.' );
         }
         if ( is_wp_error( $html ) ) {

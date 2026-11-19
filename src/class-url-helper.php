@@ -35,7 +35,7 @@ class GML_URL_Helper {
         foreach ( $urls as $url ) {
             $path = self::internal_absolute_path( $url );
             if ( $path !== null && $path !== '/' ) {
-                $paths[] = rtrim( strtok( $path, '?#' ), '/' );
+                $paths[] = rawurldecode( rtrim( strtok( $path, '?#' ), '/' ) );
             }
         }
         return array_values( array_unique( $paths ) );
