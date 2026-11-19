@@ -267,6 +267,26 @@ gml_db_assert($readiness_failed && $newer_after_readiness,'readiness failure and
 gml_db_assert(is_wp_error($old_readiness_result),'the original partial readiness operation reports failure');
 gml_db_assert(GML_Resource_Manifest_Store::snapshot_version(GML_Resource_Manifest_Store::get_by_key($key))===$newer_ready_snapshot,'a late readiness failure preserves the newer complete manifest');
 
+// Failure to invalidate the manifest must still retain the direct caller's work.
+delete_option(GML_Resource_Manifest_Manager::DIRTY_OPTION);
+$reject_snapshot=false;$reject_invalidation=false;
+$invalidate_failure=static function($sql)use(&$reject_snapshot,&$reject_invalidation){
+    if(!$reject_snapshot && preg_match('/^REPLACE INTO .?test_gml_resource_readiness/i',$sql)){
+        $reject_snapshot=true;return 'INSERT INTO test_gml_intentionally_missing_table VALUES (1)';
+    }
+    if($reject_snapshot && !$reject_invalidation && preg_match('/^UPDATE .*test_gml_resource_manifests/i',$sql)){
+        $reject_invalidation=true;return 'INSERT INTO test_gml_intentionally_missing_table VALUES (1)';
+    }
+    return $sql;
+};
+add_filter('query',$invalidate_failure);
+$old_suppression=$wpdb->suppress_errors(true);
+$failed_invalidation=(new GML_Resource_Manifest_Discovery())->discover($key);
+$wpdb->suppress_errors($old_suppression);remove_filter('query',$invalidate_failure);
+gml_db_assert($reject_snapshot && $reject_invalidation && is_wp_error($failed_invalidation),'readiness and fallback write failures are reported');
+gml_db_assert(in_array($key,(array)get_option(GML_Resource_Manifest_Manager::DIRTY_OPTION,[]),true),'a failed readiness invalidation remains durable pending work');
+GML_Resource_Manifest_Manager::process_dirty();
+
 // A source edit can also arrive between failure handling and the transient write.
 $retry_key='gml_manifest_retry_'.md5($key);
 GML_Resource_Manifest_Manager::add_dirty($key);

@@ -132,8 +132,9 @@ final class GML_Resource_Manifest_Store {
         // The manifest committed, but a later language write failed.
         // Keep the resource private and retry; preserve every TM asset.
         $saved = self::record_state( $resource, 'stale', [], $expected, $expected[1] );
+        if ( is_wp_error( $saved ) && $saved->get_error_code() === 'gml_resource_changed' ) return $saved;
+        GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
         if ( is_wp_error( $saved ) ) return $saved;
-        if ( $saved === true ) GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
         return new WP_Error( 'gml_readiness_write', 'Resource readiness snapshot could not be completed.' );
     }
 
