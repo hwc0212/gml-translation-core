@@ -42,3 +42,10 @@ $boundary_coverage['keep_source_count']=980;$boundary_coverage['resolved_bytes']
 check(GML_Page_Readiness_Policy::evaluate($boundary,$boundary_coverage)['ready'],'98 resolved exact threshold');
 $boundary_coverage['held_count']=1;
 check(!GML_Page_Readiness_Policy::evaluate($boundary,$boundary_coverage)['ready'],'resolved coverage cannot bypass hold');
+
+check(GML_Page_Readiness_Policy::evaluate($base,$coverage)['unknown_source_count']===0,'measured source lengths report zero unknown items');
+$unknown_length=$coverage;$unknown_length['unknown_count']=1;
+$unknown_result=GML_Page_Readiness_Policy::evaluate($base,$unknown_length);
+check($unknown_result['unknown_source_count']===1 && !$unknown_result['ready'],'unknown length remains visible and still blocks partial readiness');
+$unmeasured_result=GML_Page_Readiness_Policy::evaluate($complete);
+check($unmeasured_result['unknown_source_count']===null && $unmeasured_result['ready'],'absent measurement is null and preserves complete-snapshot behavior');

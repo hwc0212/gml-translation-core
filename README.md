@@ -1,5 +1,11 @@
 # GML Translation Core
 
+## 0.9.21 Readiness measurement visibility (2026-11-23)
+
+- Expose the existing unknown source-length count as a nullable read-only policy result so hosts can distinguish incomplete measurement from 100% of recorded bytes.
+- Keep all index-readiness conditions, thresholds, source/translation version checks, scheduling and recovery behavior unchanged.
+- Cover measured, unmeasured and unknown-length policy results without changing publication decisions.
+
 ## 0.9.20 Translation snapshot consistency (2026-11-19)
 
 - Calculate TM fingerprints and readiness counts inside the per-language transaction after locking its current manifest and readiness row.

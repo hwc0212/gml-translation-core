@@ -35,6 +35,8 @@ final class GML_Page_Readiness_Policy {
             'critical_unresolved_count'=>$critical,'critical_fields'=>empty($coverage['critical_fields'])?[]:explode(',',$coverage['critical_fields']),
             'percent' => $required ? floor( $translated * 1000 / $required ) / 10 : 0,
             'critical_missing_count' => $critical, 'held_count' => $held,
+            // Expose an existing measurement input; publication rules are unchanged.
+            'unknown_source_count' => isset( $coverage['unknown_count'] ) ? (int) $coverage['unknown_count'] : null,
             'source_bytes' => (int) ( $coverage['source_bytes'] ?? 0 ),
             'translated_bytes' => (int) ( $coverage['translated_bytes'] ?? 0 ),
             'resolved_bytes'=>(int)($coverage['resolved_bytes']??$coverage['translated_bytes']??0),
