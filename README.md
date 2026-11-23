@@ -1,5 +1,13 @@
 # GML Translation Core
 
+## 0.9.22 Excluded text reconstruction (2026-11-23)
+
+- Preserve visible text and title contents inside existing notranslate, translate=no and configured simple-selector exclusions, including when the same source text is translated outside the excluded region.
+- Reuse the existing markup scanner and ancestor stack. Preserve exact excluded bytes, raw textarea/code/SVG protection and allowed attribute handling.
+- Match the HTML translate=no value case-insensitively. No Translation Memory, queue, readiness or schema migration.
+- Share balanced SVG boundaries with the output buffer and apply HTML quote rules after literal backslashes, preserving technical anchors while localizing following public navigation.
+- Consumer regressions cover exact parser output and the real WordPress/TM/output-buffer path.
+
 ## 0.9.21 Readiness measurement visibility (2026-11-23)
 
 - Expose the existing unknown source-length count as a nullable read-only policy result so hosts can distinguish incomplete measurement from 100% of recorded bytes.

@@ -15,6 +15,8 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+require_once __DIR__ . '/class-html-parser.php';
+
 class GML_Translation_Output_Buffer {
 
     protected $enabled     = false;
@@ -764,6 +766,15 @@ class GML_Translation_Output_Buffer {
             $tag = substr( $html, $start, $end - $start + 1 );
 
             if ( preg_match( '/^<([a-zA-Z][a-zA-Z0-9]*)\b/', $tag, $match ) && in_array( strtolower( $match[1] ), $raw_tags, true ) ) {
+                if ( strtolower( $match[1] ) === 'svg' ) {
+                    // Share the parser's balanced SVG boundary; quoted closing
+                    // text and nested SVG must not expose technical anchors.
+                    $raw_end = preg_match( '~/\s*>$~', $tag )
+                        ? $end + 1 : GML_HTML_Parser::svg_end( $html, $end + 1 );
+                    $result .= substr( $html, $start, $raw_end - $start );
+                    $offset = $raw_end;
+                    continue;
+                }
                 $close_pattern = '#</' . preg_quote( $match[1], '#' ) . '\s*>#i';
                 if ( preg_match( $close_pattern, $html, $close, PREG_OFFSET_CAPTURE, $end + 1 ) ) {
                     $raw_end = $close[0][1] + strlen( $close[0][0] );
@@ -786,7 +797,7 @@ class GML_Translation_Output_Buffer {
         for ( $cursor = $start + 1; $cursor < $length; $cursor++ ) {
             $char = $html[ $cursor ];
             if ( $quote !== '' ) {
-                if ( $char === $quote && $html[ $cursor - 1 ] !== '\\' ) {
+                if ( $char === $quote ) {
                     $quote = '';
                 }
                 continue;

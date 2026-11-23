@@ -142,18 +142,21 @@ class GML_HTML_Parser {
      */
     private function tokenize_markup( $html, array $replacements, callable $tokenise ) {
         $stack = [];
+        $context = [ 'text_excluded' => false, 'tag_excluded' => false ];
         $void_tags = array_merge( $this->skip_tags, [ 'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr', 'textarea', 'title' ] );
         $selectors = get_option( 'gml_exclude_selectors', [] );
         if ( class_exists( 'GML_Exclusion_Rules' ) ) {
             $selectors = array_merge( $selectors, ( new GML_Exclusion_Rules() )->get_excluded_selectors() );
         }
-        return $this->map_html_tags( $html, function( $tag ) use ( $replacements, &$stack, $void_tags, $selectors ) {
+        return $this->map_html_tags( $html, function( $tag ) use ( $replacements, &$stack, $void_tags, $selectors, &$context ) {
             if ( ! preg_match( '~^<(/?)([a-zA-Z][a-zA-Z0-9:-]*)\b~', $tag, $name ) ) return $tag;
             $name_text = strtolower( $name[2] );
             if ( $name[1] === '/' ) {
                 for ( $i = count( $stack ) - 1; $i >= 0; $i-- ) {
                     if ( $stack[$i][0] === $name_text ) { $stack = array_slice( $stack, 0, $i ); break; }
                 }
+                $context['text_excluded'] = $stack && $stack[count($stack) - 1][1];
+                $context['tag_excluded'] = false;
                 return $tag;
             }
             // Consume whole attributes so data-value or quoted JSON cannot be
@@ -169,7 +172,7 @@ class GML_HTML_Parser {
             }
             $classes = preg_split( '/\s+/', $attributes['class'] ?? '' );
             $excluded = ( $stack && $stack[count($stack) - 1][1] )
-                || ( $attributes['translate'] ?? '' ) === 'no'
+                || strtolower( $attributes['translate'] ?? '' ) === 'no'
                 || in_array( 'notranslate', $classes, true );
             foreach ( $selectors as $selector ) {
                 $selector = trim( $selector );
@@ -178,6 +181,8 @@ class GML_HTML_Parser {
                 if ( $selector[0] === '#' && ( $attributes['id'] ?? '' ) === substr( $selector, 1 ) ) $excluded = true;
             }
             if ( ! in_array( $name_text, $void_tags, true ) ) $stack[] = [ $name_text, $excluded ];
+            $context['text_excluded'] = $stack && $stack[count($stack) - 1][1];
+            $context['tag_excluded'] = $excluded;
             if ( $excluded || in_array( $name_text, $this->skip_tags, true ) ) return $tag;
             $allowed = $this->text_attrs;
             if ( $name_text === 'meta' ) {
@@ -195,7 +200,7 @@ class GML_HTML_Parser {
                 $quote = $attribute[4] !== null ? $attribute[4] : '"';
                 return $attribute[1] . $attribute[2] . $attribute[3] . $quote . $translated . $quote;
             }, $tag, -1, $count, PREG_UNMATCHED_AS_NULL );
-        }, $tokenise, $replacements );
+        }, $tokenise, $replacements, $context );
     }
 
     private function input_has_ui_value( $type, $name ) {
@@ -209,7 +214,7 @@ class GML_HTML_Parser {
      * Transform complete HTML tags while respecting quoted > characters used
      * by page-builder JSON and inline configuration attributes.
      */
-    private function map_html_tags( $html, callable $callback, callable $tokenise, array $replacements ) {
+    private function map_html_tags( $html, callable $callback, callable $tokenise, array $replacements, array &$context ) {
         $html   = (string) $html;
         $length = strlen( $html );
         $offset = 0;
@@ -218,10 +223,12 @@ class GML_HTML_Parser {
         while ( $offset < $length ) {
             $start = strpos( $html, '<', $offset );
             if ( $start === false ) {
-                $result .= substr( $html, $offset );
+                $text = substr( $html, $offset );
+                $result .= $context['text_excluded'] && $text !== '' ? $tokenise( $text ) : $text;
                 break;
             }
-            $result .= substr( $html, $offset, $start - $offset );
+            $text = substr( $html, $offset, $start - $offset );
+            $result .= $context['text_excluded'] && $text !== '' ? $tokenise( $text ) : $text;
 
             if ( substr( $html, $start, 4 ) === '<!--' ) {
                 $close = strpos( $html, '-->', $start + 4 );
@@ -266,7 +273,7 @@ class GML_HTML_Parser {
                     continue;
                 }
                 if ( $name === 'svg' ) {
-                    $raw_end = $this->svg_end( $html, $offset );
+                    $raw_end = self::svg_end( $html, $offset );
                     $result .= $tokenise( $tag . substr( $html, $offset, $raw_end - $offset ) );
                     $offset = $raw_end;
                     continue;
@@ -276,7 +283,7 @@ class GML_HTML_Parser {
                     $close_start = $close[0][1];
                     $raw_end = $close_start + strlen( $close[0][0] );
                     $contents = substr( $html, $offset, $close_start - $offset );
-                    if ( $name === 'title' ) {
+                    if ( $name === 'title' && ! $context['tag_excluded'] ) {
                         $contents = $this->translated_attribute_value( $contents, $replacements, true );
                         $mapped_tag = $tag;
                     }
@@ -295,7 +302,7 @@ class GML_HTML_Parser {
     }
 
     /** SVG may nest, and may contain text that looks like a closing tag. */
-    private function svg_end( $html, $offset ) {
+    public static function svg_end( $html, $offset ) {
         $pattern = '~<!--.*?-->|<!\[CDATA\[.*?\]\]>|<(/?)([a-z][a-z0-9:-]*)(?=[\s/>])(?:[^<>"\']++|"[^"]*"|\'[^\']*\')*>~is';
         $depth = 1;
         while ( preg_match( $pattern, $html, $match, PREG_OFFSET_CAPTURE, $offset ) ) {
@@ -417,7 +424,7 @@ class GML_HTML_Parser {
     }
 
     private function is_excluded( DOMNode $node ) {
-        if ( $node->hasAttribute( 'translate' ) && $node->getAttribute( 'translate' ) === 'no' ) return true;
+        if ( $node->hasAttribute( 'translate' ) && strtolower( $node->getAttribute( 'translate' ) ) === 'no' ) return true;
         if ( $node->hasAttribute( 'class' ) ) {
             if ( in_array( 'notranslate', preg_split( '/\s+/', $node->getAttribute( 'class' ) ), true ) ) return true;
         }
