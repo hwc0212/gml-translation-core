@@ -787,11 +787,11 @@ class GML_Translation_Output_Buffer {
             $tag = substr( $html, $start, $end - $start + 1 );
 
             if ( preg_match( '/^<([a-zA-Z][a-zA-Z0-9]*)\b/', $tag, $match ) && in_array( strtolower( $match[1] ), $raw_tags, true ) ) {
-                if ( strtolower( $match[1] ) === 'svg' ) {
-                    // Share the parser's balanced SVG boundary; quoted closing
-                    // text and nested SVG must not expose technical anchors.
-                    $raw_end = preg_match( '~/\s*>$~', $tag )
-                        ? $end + 1 : GML_HTML_Parser::svg_end( $html, $end + 1 );
+                $raw_name = strtolower( $match[1] );
+                if ( in_array( $raw_name, [ 'svg', 'code', 'pre' ], true ) ) {
+                    // Share the balanced boundary with text replacement.
+                    $raw_end = $raw_name === 'svg' && preg_match( '~/\s*>$~', $tag )
+                        ? $end + 1 : GML_HTML_Parser::protected_element_end( $html, $end + 1, $raw_name );
                     $result .= substr( $html, $start, $raw_end - $start );
                     $offset = $raw_end;
                     continue;
@@ -807,6 +807,9 @@ class GML_Translation_Output_Buffer {
                     $offset = $raw_end;
                     continue;
                 }
+                // An unterminated raw-text element consumes the remaining HTML.
+                $result .= substr( $html, $start );
+                break;
             }
 
             $result .= call_user_func( $callback, $tag );

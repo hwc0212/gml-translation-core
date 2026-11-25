@@ -73,31 +73,56 @@ class GML_Breadcrumb_JSONLD {
 
     private static function paths( $node, array $path, array &$paths, $schema_context = false ) {
         if ( is_object( $node ) ) {
-            if ( isset($node->{'@context'}) ) {
-                $schema_context = false;
-                foreach ( (array)$node->{'@context'} as $context ) {
-                    if ( is_string($context) && preg_match('~^https?://schema\\.org/?$~i',$context) ) $schema_context = true;
-                }
-            }
+            $schema_context = self::schema_context( $node, $schema_context );
             $types = isset( $node->{'@type'} ) ? (array) $node->{'@type'} : [];
             if ( $schema_context && in_array( 'BreadcrumbList', $types, true ) && isset( $node->itemListElement ) && is_array( $node->itemListElement ) && count( $node->itemListElement ) <= 128 ) {
                 foreach ( $node->itemListElement as $index => $item ) {
-                    if ( ! is_object( $item ) ) continue;
+                    if ( ! is_object( $item ) || ! self::schema_context( $item, $schema_context ) ) continue;
                     $base = array_merge( $path, [ 'itemListElement', $index ] );
                     if ( isset( $item->name ) && is_string( $item->name ) ) $paths[json_encode(array_merge($base,['name']))] = 'name';
                     if ( isset( $item->item ) && is_string( $item->item ) ) {
                         $paths[json_encode(array_merge($base,['item']))] = 'url';
-                    } elseif ( isset( $item->item ) && is_object( $item->item ) ) {
+                    } elseif ( isset( $item->item ) && is_object( $item->item ) && self::schema_context( $item->item, $schema_context ) ) {
                         foreach ( [ 'name', '@id', 'id', 'url' ] as $key ) {
                             if ( isset( $item->item->$key ) && is_string( $item->item->$key ) ) $paths[json_encode(array_merge($base,['item',$key]))] = $key === 'name' ? 'name' : 'url';
                         }
                     }
                 }
             }
-            foreach ( get_object_vars( $node ) as $key => $value ) self::paths( $value, array_merge($path,[(string)$key]), $paths, $schema_context );
+            foreach ( get_object_vars( $node ) as $key => $value ) {
+                if ( $key !== '@context' ) self::paths( $value, array_merge($path,[(string)$key]), $paths, $schema_context );
+            }
         } elseif ( is_array( $node ) ) {
             foreach ( $node as $key => $value ) self::paths( $value, array_merge($path,[$key]), $paths, $schema_context );
         }
+    }
+
+
+    /** Null preserves unresolved inherited term definitions until an explicit reset. */
+    private static function schema_context( $node, $inherited ) {
+        if ( ! property_exists( $node, '@context' ) ) return $inherited;
+        $contexts = is_array( $node->{'@context'} ) ? $node->{'@context'} : [ $node->{'@context'} ];
+        foreach ( $contexts as $context ) {
+            if ( $context === null ) { $inherited = false; continue; }
+            if ( is_string( $context ) ) {
+                if ( ! preg_match( '~^https?://schema\\.org/?$~i', $context ) ) return null;
+                if ( $inherited !== null ) $inherited = true;
+            } elseif ( is_object( $context ) ) {
+                foreach ( get_object_vars( $context ) as $key => $value ) {
+                    if ( $key === '@vocab' ) {
+                        if ( ! is_string($value) || ! preg_match('~^https?://schema\\.org/?$~i',$value) ) return null;
+                        if ( $inherited !== null ) $inherited = true;
+                    } elseif ( ! in_array( $key, [ '@language', '@version' ], true ) ) {
+                        // Aliases, term overrides, @base and opaque remote contexts
+                        // require a full JSON-LD processor. Leave them untouched.
+                        return null;
+                    }
+                }
+            } else {
+                return null;
+            }
+        }
+        return $inherited;
     }
 
     private static function whitespace( $json, &$offset ) {

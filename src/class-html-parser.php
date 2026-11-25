@@ -285,8 +285,8 @@ class GML_HTML_Parser {
                     $result .= $tokenise( $tag );
                     continue;
                 }
-                if ( $name === 'svg' ) {
-                    $raw_end = self::svg_end( $html, $offset );
+                if ( in_array( $name, [ 'svg', 'code', 'pre' ], true ) ) {
+                    $raw_end = self::protected_element_end( $html, $offset, $name );
                     $result .= $tokenise( $tag . substr( $html, $offset, $raw_end - $offset ) );
                     $offset = $raw_end;
                     continue;
@@ -326,22 +326,26 @@ class GML_HTML_Parser {
         return (bool) preg_match( '~^<(?:/?[a-zA-Z]|!|\\?)~', substr( $html, $offset, 3 ) );
     }
 
-    /** SVG may nest, and may contain text that looks like a closing tag. */
+    /** Retain the public SVG boundary helper for existing callers. */
     public static function svg_end( $html, $offset ) {
-        $pattern = '~<!--.*?-->|<!\[CDATA\[.*?\]\]>|<(/?)([a-z][a-z0-9:-]*)(?=[\s/>])(?:[^<>"\']++|"[^"]*"|\'[^\']*\')*>~is';
+        return self::protected_element_end( $html, $offset, 'svg' );
+    }
+
+    /** Protected elements can nest; quoted attributes and raw text are not tags. */
+    public static function protected_element_end( $html, $offset, $element ) {
+        $pattern = '~<!--(?:.*?-->|.*\z)|<!\[CDATA\[(?:.*?\]\]>|.*\z)|<(/?)([a-z][a-z0-9:-]*)(?=[\s/>])(?:[^<>"\']++|"[^"]*"|\'[^\']*\')*>~is';
         $depth = 1;
         while ( preg_match( $pattern, $html, $match, PREG_OFFSET_CAPTURE, $offset ) ) {
             $offset = $match[0][1] + strlen( $match[0][0] );
             $name = strtolower( $match[2][0] ?? '' );
-            if ( $name === 'svg' ) {
+            if ( $name === $element ) {
                 if ( $match[1][0] === '/' ) {
                     if ( --$depth === 0 ) return $offset;
-                } elseif ( ! preg_match( '~/\s*>$~', $match[0][0] ) ) {
+                } elseif ( $element !== 'svg' || ! preg_match( '~/\s*>$~', $match[0][0] ) ) {
                     $depth++;
                 }
-            } elseif ( in_array( $name, [ 'script', 'style' ], true ) && $match[1][0] !== '/'
-                && ! preg_match( '~/\s*>$~', $match[0][0] )
-                && preg_match( '~</' . $name . '\s*>~i', $html, $end, PREG_OFFSET_CAPTURE, $offset ) ) {
+            } elseif ( in_array( $name, [ 'script', 'style', 'textarea', 'title', 'iframe', 'noscript' ], true ) && $match[1][0] !== '/' ) {
+                if ( ! preg_match( '~</' . $name . '\s*>~i', $html, $end, PREG_OFFSET_CAPTURE, $offset ) ) return strlen( $html );
                 $offset = $end[0][1] + strlen( $end[0][0] );
             }
         }

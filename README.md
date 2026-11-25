@@ -1,5 +1,11 @@
 # GML Translation Core
 
+## 0.9.24 Pre-merge data boundaries (2026-11-25)
+
+- Respect explicit null and nested JSON-LD contexts. Skip aliases, term overrides and opaque vocabularies whose schema meaning cannot be established locally.
+- Share balanced code/pre/SVG boundaries between text replacement and URL rewriting, including nested and unterminated protected blocks.
+- Keep existing readiness locks, snapshots, retries, TM records and publication thresholds unchanged. Consumer regressions cover the new boundaries.
+
 ## 0.9.23 Comparison text and breadcrumb labels (2026-11-25)
 
 - Keep literal comparison signs in whole-node text reconstruction; reuse markup-start recognition in exclusion and navigation scans.
