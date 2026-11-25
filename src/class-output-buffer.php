@@ -445,6 +445,12 @@ class GML_Translation_Output_Buffer {
                 continue;
             }
 
+            if ( ! GML_HTML_Parser::is_markup_start($html,$lt) ) {
+                $result .= '<';
+                $pos = $lt + 1;
+                continue;
+            }
+
             // Find the end of this tag
             $gt = $this->find_tag_end( $html, $lt );
             if ( $gt === false ) {
@@ -505,6 +511,10 @@ class GML_Translation_Output_Buffer {
                 $next_lt = strpos( $html, '<', $j );
                 if ( $next_lt === false ) break;
 
+                if ( ! GML_HTML_Parser::is_markup_start($html,$next_lt) ) {
+                    $j = $next_lt + 1;
+                    continue;
+                }
                 $next_gt = $this->find_tag_end( $html, $next_lt );
                 if ( $next_gt === false ) break;
 
@@ -609,6 +619,11 @@ class GML_Translation_Output_Buffer {
                     return $this->rewrite_tag_url_attribute( $tag, 'form', 'action', $home_origin, $prefix, $lang_pattern, $excluded_paths );
                 }
                 return $tag;
+            },
+            function( $json ) use ( $home_origin, $prefix, $lang_pattern, $excluded_paths ) {
+                return GML_Breadcrumb_JSONLD::map( $json, null, function( $url ) use ( $home_origin, $prefix, $lang_pattern, $excluded_paths ) {
+                    return $this->rewrite_single_url( $url, $home_origin, $prefix, $lang_pattern, $excluded_paths );
+                } );
             }
         );
     }
@@ -732,12 +747,12 @@ class GML_Translation_Output_Buffer {
      * Map complete HTML tags without treating a quoted > as a tag boundary.
      * Raw script/style/SVG blocks and comments remain byte-for-byte unchanged.
      */
-    protected function map_html_tags( $html, callable $callback ) {
+    protected function map_html_tags( $html, callable $callback, callable $jsonld_callback = null ) {
         $html     = (string) $html;
         $length   = strlen( $html );
         $offset   = 0;
         $result   = '';
-        $raw_tags = [ 'script', 'style', 'noscript', 'textarea', 'svg', 'iframe' ];
+        $raw_tags = [ 'script', 'style', 'noscript', 'textarea', 'svg', 'iframe', 'pre', 'code' ];
 
         while ( $offset < $length ) {
             $start = strpos( $html, '<', $offset );
@@ -755,6 +770,12 @@ class GML_Translation_Output_Buffer {
                 }
                 $result .= substr( $html, $start, $comment_end - $start + 3 );
                 $offset = $comment_end + 3;
+                continue;
+            }
+
+            if ( ! GML_HTML_Parser::is_markup_start($html,$start) ) {
+                $result .= '<';
+                $offset = $start + 1;
                 continue;
             }
 
@@ -778,7 +799,11 @@ class GML_Translation_Output_Buffer {
                 $close_pattern = '#</' . preg_quote( $match[1], '#' ) . '\s*>#i';
                 if ( preg_match( $close_pattern, $html, $close, PREG_OFFSET_CAPTURE, $end + 1 ) ) {
                     $raw_end = $close[0][1] + strlen( $close[0][0] );
-                    $result .= substr( $html, $start, $raw_end - $start );
+                    if ( strtolower($match[1]) === 'script' && $jsonld_callback && GML_Breadcrumb_JSONLD::is_script_tag($tag) ) {
+                        $result .= $tag . call_user_func($jsonld_callback, substr($html,$end+1,$close[0][1]-$end-1)) . $close[0][0];
+                    } else {
+                        $result .= substr( $html, $start, $raw_end - $start );
+                    }
                     $offset = $raw_end;
                     continue;
                 }

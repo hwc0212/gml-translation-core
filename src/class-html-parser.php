@@ -14,6 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 require_once __DIR__ . '/class-translation-text.php';
+require_once __DIR__ . '/class-breadcrumb-jsonld.php';
 
 class GML_HTML_Parser {
 
@@ -121,15 +122,19 @@ class GML_HTML_Parser {
         // just as walk() does, without serializing or reformatting the DOM.
         // This handles mixed named/numeric entities and prevents replacements
         // from cascading through a previously translated value.
-        $html = preg_replace_callback( '/(^|>)([^<]+)(?=<|$)/s', static function( $match ) use ( $safe_replacements ) {
-            $decoded = html_entity_decode( $match[2], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+        $parts = preg_split( '/(<!--GMLURL_[0-9]+_[a-f0-9]{32}-->)/', $html, -1, PREG_SPLIT_DELIM_CAPTURE );
+        foreach ( $parts as &$part ) {
+            if ( isset( $tokens[$part] ) ) continue;
+            $decoded = html_entity_decode( $part, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
             $key = trim( $decoded );
-            if ( ! array_key_exists( $key, $safe_replacements ) ) return $match[0];
-            $leading = strlen( $match[2] ) - strlen( ltrim( $match[2] ) );
-            $trailing = strlen( $match[2] ) - strlen( rtrim( $match[2] ) );
-            return $match[1] . substr( $match[2], 0, $leading ) . $safe_replacements[ $key ]
-                . ( $trailing ? substr( $match[2], -$trailing ) : '' );
-        }, $html );
+            if ( ! array_key_exists( $key, $safe_replacements ) ) continue;
+            $leading = strlen( $part ) - strlen( ltrim( $part ) );
+            $trailing = strlen( $part ) - strlen( rtrim( $part ) );
+            $part = substr( $part, 0, $leading ) . $safe_replacements[$key]
+                . ( $trailing ? substr( $part, -$trailing ) : '' );
+        }
+        unset( $part );
+        $html = implode( '', $parts );
 
         // ── Step 2b: precise title replacement ────────────────────────────────
         return strtr( $html, $tokens );
@@ -238,6 +243,14 @@ class GML_HTML_Parser {
                 continue;
             }
 
+            // A comparison sign before a number or whitespace is visible text,
+            // not an HTML tag. Keep it in the same replacement segment.
+            if ( ! preg_match( '~^<(?:/?[a-zA-Z]|!|\\?)~', substr( $html, $start, 3 ) ) ) {
+                $result .= $context['text_excluded'] ? $tokenise('<') : '<';
+                $offset = $start + 1;
+                continue;
+            }
+
             $quote = '';
             $end   = $start + 1;
             for ( ; $end < $length; $end++ ) {
@@ -259,7 +272,7 @@ class GML_HTML_Parser {
             }
 
             if ( $end >= $length ) {
-                $result .= substr( $html, $start );
+                $result .= $tokenise( substr( $html, $start ) );
                 break;
             }
 
@@ -287,6 +300,13 @@ class GML_HTML_Parser {
                         $contents = $this->translated_attribute_value( $contents, $replacements, true );
                         $mapped_tag = $tag;
                     }
+                    if ( $name === 'script' && ! $context['tag_excluded'] && GML_Breadcrumb_JSONLD::is_script_tag( $tag ) ) {
+                        $contents = GML_Breadcrumb_JSONLD::map( $contents, static function( $name ) use ( $replacements ) {
+                            $key = GML_Breadcrumb_JSONLD::text( $name );
+                            if ( ! isset($replacements[$key]) || trim((string)$replacements[$key]) === '' ) return $name;
+                            return GML_Breadcrumb_JSONLD::text( GML_Translation_Text::clean_markdown_wrappers( (string)$replacements[$key] ) );
+                        } );
+                    }
                     $block = $mapped_tag . $contents . $close[0][0];
                 } else {
                     $block = $mapped_tag . substr( $html, $offset );
@@ -299,6 +319,11 @@ class GML_HTML_Parser {
         }
 
         return $result;
+    }
+
+    /** HTML permits a literal less-than sign when it does not start markup. */
+    public static function is_markup_start( $html, $offset ) {
+        return (bool) preg_match( '~^<(?:/?[a-zA-Z]|!|\\?)~', substr( $html, $offset, 3 ) );
     }
 
     /** SVG may nest, and may contain text that looks like a closing tag. */
@@ -361,6 +386,13 @@ class GML_HTML_Parser {
     private function walk( DOMNode $node, array &$nodes ) {
         if ( $node->nodeType === XML_ELEMENT_NODE ) {
             $tag = strtolower( $node->nodeName );
+            if ( $tag === 'script' && ! $this->is_excluded( $node )
+                && GML_Breadcrumb_JSONLD::is_script_tag( '<script type="' . htmlspecialchars($node->getAttribute('type'), ENT_QUOTES, 'UTF-8') . '">' ) ) {
+                foreach ( GML_Breadcrumb_JSONLD::texts( $node->textContent ) as $text ) {
+                    if ( ! $this->skip_text($text) ) $nodes[] = ['type'=>'schema_text','text'=>$text,'hash'=>md5($text),'context_type'=>'text'];
+                }
+                return;
+            }
             if ( in_array( $tag, $this->skip_tags, true ) ) return;
             if ( $this->is_excluded( $node ) ) return;
             if ( $tag === 'meta' ) { $this->extract_meta( $node, $nodes ); return; }

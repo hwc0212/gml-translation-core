@@ -34,3 +34,22 @@ $parsed['replacements'] = [ 'Dimensions' => '**Abmessungen 90*45*30mm**' ];
 $result = $parser->rebuild( $parsed );
 gml_db_assert( strpos( $result, '<p>Abmessungen 90*45*30mm</p>' ) !== false, 'Markdown bold wrapper can be removed without damaging the dimension' );
 gml_db_assert( $GLOBALS['gml_test_http_calls'] === 0, 'technical text rendering needs no AI request' );
+
+// Raw comparison signs must survive the complete extraction/rebuild path.
+foreach ( ['<500','< 500','&lt;500','&#60;500'] as $comparison ) {
+    $raw='Water condition '.$comparison.' µS/cm at 15°C, ambient 20°C';
+    $source=html_entity_decode($raw,ENT_QUOTES|ENT_HTML5,'UTF-8');
+    $target=str_replace('Water condition','Wasserbedingung',$source);
+    $parsed=$parser->parse('<p>'.$raw.'</p><a href="/next/">Next</a>');
+    gml_db_assert(in_array($source,array_column($parsed['nodes'],'text'),true),'raw comparison sentence extracted: '.$comparison);
+    $parsed['replacements']=[$source=>$target];
+    gml_db_assert(strpos($parser->rebuild($parsed),htmlspecialchars($target,ENT_QUOTES|ENT_HTML5,'UTF-8'))!==false,'raw comparison sentence rendered: '.$comparison);
+}
+$schema=['@context'=>'https://schema.org','@type'=>'BreadcrumbList','itemListElement'=>[['@type'=>'ListItem','position'=>1,'item'=>['name'=>'Synthetic equipment &amp;#038; parts','@id'=>'https://example.test/category/']]]];
+$raw=json_encode($schema);
+$parsed=$parser->parse('<script type="application/ld+json">'.$raw.'</script>');
+gml_db_assert(in_array('Synthetic equipment & parts',array_column($parsed['nodes'],'text'),true),'breadcrumb name joins the existing text pipeline');
+$parsed['replacements']=['Synthetic equipment & parts'=>'Synthetische Ausrüstung & Teile'];
+$out=$parser->rebuild($parsed);
+gml_db_assert(strpos($out,'Synthetische Ausrüstung')!==false,'breadcrumb label reuses supplied translation');
+gml_db_assert(strpos($out,'https:\\/\\/example.test\\/category\\/')!==false,'parser does not change breadcrumb URLs or emit competing schema');

@@ -1,5 +1,13 @@
 # GML Translation Core
 
+## 0.9.23 Comparison text and breadcrumb labels (2026-11-25)
+
+- Keep literal comparison signs in whole-node text reconstruction; reuse markup-start recognition in exclusion and navigation scans.
+- Discover only human-readable BreadcrumbList item labels from valid schema.org JSON-LD and reuse existing scoped translation lookup, manual records and missing-string gates.
+- Patch only allowlisted JSON string spans, preserving every other byte, graph identity, numbers, other schema nodes and ordinary scripts. Malformed, duplicate-key and oversized payloads are untouched.
+- Localize breadcrumb item page URLs through existing public-navigation rules, preserving installation boundaries, pagination, fragments, media and service exclusions. No competing schema or SEO ownership change.
+- No schema/TM migration, forced index, new queue, AI transport, scheduler or data rewrite. Source and translated page discovery may include previously unseen breadcrumb labels.
+
 ## 0.9.22 Excluded text reconstruction (2026-11-23)
 
 - Preserve visible text and title contents inside existing notranslate, translate=no and configured simple-selector exclusions, including when the same source text is translated outside the excluded region.
