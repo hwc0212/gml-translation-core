@@ -1,5 +1,14 @@
 # GML Translation Core
 
+## 0.9.25 Explicit single-resource inventory refresh (2026-11-26)
+
+- Add snapshot-bound inventory refresh using the existing renderer, manifest transaction and configured-language readiness calculations. Empty-target discovery still never calls the translation discover branch.
+- Explicit refresh reports partial readiness failure without adding new dirty recovery hints; normal background discovery retains its existing recovery behavior.
+- Detect observed cache-epoch changes during rendering/parsing and retain existing source/global/manifest version guards. This is not an atomic dependency graph for embedded products.
+- Sign inventory-only source requests using the existing crawl secret. The consuming product must avoid scheduler repair in this request context and still enforce administrator capability, nonce and snapshot checks.
+- Keep internal cache invalidation and resource URL outbox consistency. Cache generation can affect all GML HTML keys; registered adapters may later purge current/historical URLs. No zero-cache-side-effect or atomic multi-language rollback claim.
+- No schema migration, TM mutation, AI enqueue, queue priority or publication-policy change. See [isolated acceptance and limitations](docs/inventory-refresh-0.9.25.md).
+
 ## 0.9.24 Pre-merge data boundaries (2026-11-25)
 
 - Respect explicit null and nested JSON-LD contexts. Skip aliases, term overrides and opaque vocabularies whose schema meaning cannot be established locally.

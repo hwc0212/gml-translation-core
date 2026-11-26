@@ -14,7 +14,7 @@ final class GML_Resource_Manifest_Store {
     }
 
     /** Optional output identifies this attempt even when a write rolls back. */
-    public static function save_complete( GML_Resource_Identity $resource, array $nodes, ?array $expected = null, $scanned_global = null, &$written_snapshot = null ) {
+    public static function save_complete( GML_Resource_Identity $resource, array $nodes, ?array $expected = null, $scanned_global = null, &$written_snapshot = null, $schedule_recovery = true ) {
         global $wpdb;
         $written_snapshot = $expected ?? [];
         if ( ! self::tables_ready() ) return new WP_Error( 'gml_manifest_schema', 'Resource manifest schema is unavailable.' );
@@ -71,7 +71,7 @@ final class GML_Resource_Manifest_Store {
                 return new WP_Error( 'gml_manifest_write', 'Resource manifest could not be refreshed.' );
             }
             $written_snapshot = self::snapshot_version( $manifest );
-            $readiness = self::refresh_readiness( $resource, (int) $manifest->id, $written_snapshot, $written_snapshot );
+            $readiness = self::refresh_readiness( $resource, (int) $manifest->id, $written_snapshot, $written_snapshot, $schedule_recovery );
             if ( is_wp_error( $readiness ) ) return $readiness;
             self::clear_language_readiness();
             return true;
@@ -125,19 +125,20 @@ final class GML_Resource_Manifest_Store {
         }
 
         $written_snapshot = self::snapshot_version( (object) $data );
-        $readiness = self::refresh_readiness( $resource, $resource_id, $written_snapshot, $written_snapshot );
+        $readiness = self::refresh_readiness( $resource, $resource_id, $written_snapshot, $written_snapshot, $schedule_recovery );
         if ( is_wp_error( $readiness ) ) return $readiness;
         self::clear_language_readiness();
         return true;
     }
 
-    private static function refresh_readiness( GML_Resource_Identity $resource, $resource_id, array $expected, &$written_snapshot ) {
+    private static function refresh_readiness( GML_Resource_Identity $resource, $resource_id, array $expected, &$written_snapshot, $schedule_recovery ) {
         if ( ! class_exists( 'GML_Resource_Readiness' ) || GML_Resource_Readiness::refresh_manifest_snapshot( $resource_id ) ) return true;
         // The manifest committed, but a later language write failed.
-        // Keep the resource private and retry; preserve every TM asset.
+        // Keep the resource private; preserve every TM asset. Explicit inventory
+        // maintenance reports partial failure without adding background work.
         $saved = self::record_state( $resource, 'stale', [], $expected, $expected[1], $written_snapshot );
         if ( is_wp_error( $saved ) && $saved->get_error_code() === 'gml_resource_changed' ) return $saved;
-        GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
+        if ( $schedule_recovery ) GML_Resource_Manifest_Manager::add_dirty( $resource->get_key() );
         if ( is_wp_error( $saved ) ) return $saved;
         return new WP_Error( 'gml_readiness_write', 'Resource readiness snapshot could not be completed.' );
     }
