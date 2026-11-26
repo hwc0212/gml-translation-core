@@ -6,6 +6,9 @@ final class GML_Resource_Manifest_Manager {
     const GLOBAL_OPTION = 'gml_resource_manifest_global_generation';
     const DIRTY_OPTION = 'gml_resource_manifest_dirty';
     const DIRTY_HOOK = 'gml_resource_manifest_dirty';
+    const FAILURE_OPTION = 'gml_resource_manifest_last_failure';
+    const RECOVERY_CURSOR = 'gml_inventory_recovery_cursor';
+    const RECOVERY_PAGE = 64;
     private static $registered = false;
     private static $global_bumped = false;
 
@@ -25,6 +28,7 @@ final class GML_Resource_Manifest_Manager {
             add_action($hook, [__CLASS__, 'seo_meta_changed'], 40, 4);
         }
         add_action( self::DIRTY_HOOK, [ __CLASS__, 'process_dirty' ] );
+        add_action( GML_Resource_Readiness::REBUILD_HOOK, [ __CLASS__, 'recover_pending' ], 5 );
         add_action( 'gml_resource_readiness_reverse', [ __CLASS__, 'process_reverse' ] );
         GML_Resource_Readiness::register_hooks();
         GML_Resource_Backfill::register_hooks();
@@ -41,6 +45,7 @@ final class GML_Resource_Manifest_Manager {
         if (!GML_Page_Cache::invalidate_all_clusters()) { self::$global_bumped = false; return false; }
         update_option( self::GLOBAL_OPTION, self::global_generation() + 1, false );
         GML_Resource_Backfill::reset_pending( sanitize_key( $reason ) );
+        if ( get_option( self::DIRTY_OPTION, [] ) ) self::schedule_dirty();
         self::maybe_schedule();
         return true;
     }
@@ -61,6 +66,7 @@ final class GML_Resource_Manifest_Manager {
             return;
         }
         GML_Resource_Manifest_Store::mark_stale( $resource );
+        delete_transient( 'gml_manifest_retry_' . md5( $resource->get_key() ) );
         self::add_dirty( $resource->get_key() );
     }
 
@@ -70,6 +76,7 @@ final class GML_Resource_Manifest_Manager {
         $resource = GML_Resource_Identity::for_term( (int) $term_id, (string) $taxonomy );
         if ( ! $resource ) return;
         GML_Resource_Manifest_Store::mark_stale( $resource );
+        delete_transient( 'gml_manifest_retry_' . md5( $resource->get_key() ) );
         self::add_dirty( $resource->get_key() );
     }
 
@@ -140,42 +147,250 @@ final class GML_Resource_Manifest_Manager {
     }
 
     public static function add_dirty( $key ) {
-        $dirty = array_values( array_unique( array_filter( (array) get_option( self::DIRTY_OPTION, [] ) ) ) );
-        $dirty[] = substr( (string) $key, 0, 191 );
-        $dirty = array_values(array_unique($dirty));
-        if (count($dirty) > 200) {
-            // Final merged size, including the triggering post, owns overflow.
-            foreach (array_slice($dirty, 0, count($dirty)-200) as $retired_key) {
-                GML_Resource_Manifest_Store::exclude_retired_key($retired_key);
-            }
-            GML_Resource_Backfill::reset_pending('dirty_overflow');
+        $key = substr( (string) $key, 0, 191 );
+        if ( $key === '' ) return false;
+        $overflow = [];
+        $saved = self::mutate_dirty( static function( $dirty ) use ( $key, &$overflow ) {
+            $dirty[] = $key;
+            $dirty = array_values( array_unique( $dirty ) );
+            $overflow = array_slice( $dirty, 0, max( 0, count( $dirty ) - 200 ) );
+            return array_slice( $dirty, -200 );
+        } );
+        if ( $overflow || ! $saved ) {
+            foreach ( $overflow as $retired_key ) GML_Resource_Manifest_Store::exclude_retired_key( $retired_key );
+            GML_Resource_Backfill::reset_pending( 'dirty_overflow' );
             GML_Resource_Backfill::maybe_schedule();
-            $dirty = array_slice($dirty, -200);
         }
-        update_option( self::DIRTY_OPTION, $dirty, false );
-        if ( ! wp_next_scheduled( self::DIRTY_HOOK ) ) wp_schedule_single_event( time() + 15, self::DIRTY_HOOK );
+        self::schedule_dirty();
+        return $saved;
+    }
+
+    /** Atomic hints; the manifest table remains the durable work authority. */
+    private static function mutate_dirty( callable $change ) {
+        global $wpdb;
+        for ( $attempt = 0; $attempt < 5; $attempt++ ) {
+            $raw = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s", self::DIRTY_OPTION ) );
+            if ( $wpdb->last_error !== '' ) return false;
+            $dirty = array_values( array_unique( array_filter( (array) maybe_unserialize( $raw ) ) ) );
+            $next = array_values( call_user_func( $change, $dirty ) );
+            $value = maybe_serialize( $next );
+            if ( $raw === $value ) return true;
+            $saved = $raw === null
+                ? $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name,option_value,autoload) VALUES (%s,%s,'no')", self::DIRTY_OPTION, $value ) )
+                : $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value=%s,autoload='no' WHERE option_name=%s AND BINARY option_value=BINARY %s", $value, self::DIRTY_OPTION, $raw ) );
+            if ( $saved === false ) return false;
+            if ( $saved === 1 ) {
+                wp_cache_delete( self::DIRTY_OPTION, 'options' );
+                wp_cache_delete( 'alloptions', 'options' );
+                wp_cache_delete( 'notoptions', 'options' );
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function schedule_dirty( $when = null ) {
+        $when = $when ?? time() + 30;
+        $next = wp_next_scheduled( self::DIRTY_HOOK );
+        // A new edit needs an earlier wakeup than a resource in backoff.
+        if ( $next && $next > $when ) {
+            if ( ! wp_unschedule_event( $next, self::DIRTY_HOOK ) ) return;
+            $next = false;
+        }
+        if ( ! $next ) wp_schedule_single_event( $when, self::DIRTY_HOOK );
+    }
+
+    /** Recover work lost by an interrupted or older worker, without AI work. */
+    public static function recover_pending( $mode = 'recovery' ) {
+        if ( ! in_array( $mode, [ 'recovery', 'inventory' ], true ) || ! GML_Resource_Manifest_Store::tables_ready() ) return;
+        global $wpdb;
+        $dirty = array_fill_keys( (array) get_option( self::DIRTY_OPTION, [] ), true );
+        if ( count( $dirty ) > 200 - GML_Resource_Backfill::BATCH ) {
+            self::schedule_inventory();
+            return;
+        }
+        $cursor = (int) get_option( self::RECOVERY_CURSOR, 0 );
+        $manifests = GML_Resource_Manifest_Store::manifest_table();
+        $readiness = GML_Resource_Manifest_Store::readiness_table();
+        $languages = GML_Language_Utils::configured_codes( true, true );
+        if ( ! $languages ) return;
+        $placeholders = implode( ',', array_fill( 0, count( $languages ), '%s' ) );
+        // Check a bounded page of manifest IDs, including complete rows whose
+        // stored language snapshots still point to a different generation.
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT m.id,m.resource_key,m.discovery_state,m.global_generation,
+                    (SELECT COUNT(*) FROM $readiness r WHERE r.resource_id=m.id
+                     AND r.target_lang IN ($placeholders) AND r.manifest_generation=m.manifest_generation
+                     AND r.global_generation=m.global_generation) AS matching_languages
+             FROM $manifests m WHERE m.id>%d ORDER BY m.id LIMIT %d",
+            array_merge( $languages, [ $cursor, self::RECOVERY_PAGE ] )
+        ) );
+        if ( $wpdb->last_error !== '' ) {
+            self::schedule_inventory();
+            return;
+        }
+        $global = self::global_generation();
+        $queued = 0;
+        foreach ( $rows as $row ) {
+            $incomplete = in_array( $row->discovery_state, [ 'stale', 'unknown', 'render_error' ], true );
+            $outdated = $row->discovery_state === 'complete' && (
+                (int) $row->global_generation !== $global || (int) $row->matching_languages !== count( $languages )
+            );
+            if ( ( $incomplete || $outdated ) && ! isset( $dirty[ $row->resource_key ] ) ) {
+                if ( ! self::add_dirty( $row->resource_key ) ) {
+                    self::schedule_inventory();
+                    return;
+                }
+                $queued++;
+            }
+            $cursor = (int) $row->id;
+            if ( $queued >= GML_Resource_Backfill::BATCH ) break;
+        }
+        $more = count( $rows ) === self::RECOVERY_PAGE || $queued >= GML_Resource_Backfill::BATCH;
+        update_option( self::RECOVERY_CURSOR, $more ? $cursor : 0, false );
+        if ( $more ) self::schedule_inventory();
+    }
+
+    private static function schedule_inventory() {
+        $args = [ 'inventory' ];
+        if ( ! wp_next_scheduled( GML_Resource_Readiness::REBUILD_HOOK, $args ) ) {
+            wp_schedule_single_event( time() + 30, GML_Resource_Readiness::REBUILD_HOOK, $args );
+        }
+    }
+
+    public static function record_failure( $key, $result, $phase = 'dirty' ) {
+        update_option( self::FAILURE_OPTION, [
+            'resource_key' => substr( (string) $key, 0, 191 ),
+            'error_code' => is_wp_error( $result ) ? sanitize_key( $result->get_error_code() ) : 'gml_manifest_write',
+            'phase' => sanitize_key( $phase ), 'updated_at' => time(),
+        ], false );
     }
 
     public static function process_dirty() {
-        $dirty = (array) get_option( self::DIRTY_OPTION, [] );
-        if ( ! $dirty ) return;
+        global $wpdb;
+        if ( ! get_option( self::DIRTY_OPTION, [] ) ) {
+            // Prefer interrupted work for the active generation. The periodic
+            // cursor independently covers older generations and partial writes.
+            if ( ! GML_Resource_Manifest_Store::tables_ready() ) return;
+            $table = GML_Resource_Manifest_Store::manifest_table();
+            $keys = $wpdb->get_col( $wpdb->prepare(
+                "SELECT resource_key FROM $table WHERE discovery_state IN ('stale','unknown','render_error')
+                 AND global_generation=%d ORDER BY updated_at,id LIMIT %d",
+                self::global_generation(), GML_Resource_Backfill::BATCH
+            ) );
+            foreach ( (array) $keys as $key ) self::add_dirty( $key );
+        }
+        if ( ! get_option( self::DIRTY_OPTION, [] ) ) return;
+        // Persist the wakeup before claiming. A killed worker leaves stale
+        // manifests that the next event can reconstruct into dirty hints.
         $token = GML_Atomic_Option_Lock::acquire( GML_Resource_Backfill::LOCK, 180 );
-        if ( $token === '' ) { wp_schedule_single_event( time() + 30, self::DIRTY_HOOK ); return; }
+        if ( $token === '' ) {
+            self::schedule_dirty();
+            return;
+        }
+        $batch = [];
         try {
-            $batch = array_slice( $dirty, 0, 5 );
+            $retries = [];
+            $next_retry = null;
+            $global = self::global_generation();
+            foreach ( (array) get_option( self::DIRTY_OPTION, [] ) as $key ) {
+                $retry_key = 'gml_manifest_retry_' . md5( $key );
+                $retry = (array) get_transient( $retry_key );
+                if ( $retry ) {
+                    $manifest = GML_Resource_Manifest_Store::get_by_key( $key );
+                    $snapshot = GML_Resource_Manifest_Store::snapshot_version( $manifest );
+                    if ( $wpdb->last_error === '' && isset( $retry['source_snapshot'] ) && $retry['source_snapshot'] !== $snapshot ) {
+                        delete_transient( $retry_key );
+                        $retry = [];
+                    } elseif ( $manifest && ! isset( $retry['source_snapshot'] ) ) {
+                        // Add snapshot identity to legacy records without shortening a valid delay.
+                        $retry['global_generation'] = $retry['global_generation'] ?? (int) $manifest->global_generation;
+                        $retry['source_snapshot'] = $snapshot;
+                        set_transient( $retry_key, $retry, DAY_IN_SECONDS );
+                    }
+                }
+                if ( isset( $retry['global_generation'] ) && (int) $retry['global_generation'] !== $global ) {
+                    delete_transient( $retry_key );
+                    $retry = [];
+                }
+                $after = (int) ( $retry['after'] ?? 0 );
+                if ( $after > time() ) {
+                    $next_retry = $next_retry === null ? $after : min( $next_retry, $after );
+                    continue;
+                }
+                $retries[ $key ] = $retry;
+                if ( count( $retries ) === GML_Resource_Backfill::BATCH ) break;
+            }
+            if ( ! $retries ) {
+                if ( $next_retry !== null ) self::schedule_dirty( $next_retry );
+                return;
+            }
+            self::schedule_dirty();
+            if ( ! self::mutate_dirty( static function( $dirty ) use ( $retries, &$batch ) {
+                $batch = array_values( array_intersect( array_keys( $retries ), $dirty ) );
+                return array_values( array_diff( $dirty, $batch ) );
+            } ) ) return;
             $discovery = new GML_Resource_Manifest_Discovery();
             foreach ( $batch as $key ) {
-                if ( ! GML_Atomic_Option_Lock::refresh( GML_Resource_Backfill::LOCK, $token, 180 ) ) return;
-                $discovery->discover( $key );
+                if ( ! GML_Atomic_Option_Lock::refresh( GML_Resource_Backfill::LOCK, $token, 180 ) ) break;
+                $retry_key = 'gml_manifest_retry_' . md5( $key );
+                $retry = $retries[ $key ];
+                $attempt_snapshot = [];
+                $result = $discovery->discover( $key, '', $attempt_snapshot );
+                $row = GML_Resource_Manifest_Store::get_by_key( $key );
+                $terminal = $row && in_array( $row->discovery_state, [ 'excluded', 'permanent_redirect' ], true );
+                if ( $result !== true && ! $terminal ) {
+                    self::add_dirty( $key );
+                    self::record_failure( $key, $result );
+                    // Only the tuple returned by the attempted write owns its delay.
+                    // A later read may already belong to a new edit or discovery.
+                    $source_changed = $attempt_snapshot !== GML_Resource_Manifest_Store::snapshot_version( $row )
+                        || ( is_wp_error( $result ) && $result->get_error_code() === 'gml_resource_changed' );
+                    $attempt = $source_changed ? 1 : min( 8, 1 + (int) ( $retry['attempt'] ?? 0 ) );
+                    // The first retry may run immediately; sustained failures back off.
+                    $delay = $attempt === 1 ? 0 : min( HOUR_IN_SECONDS, 30 * ( 2 ** ( $attempt - 1 ) ) );
+                    set_transient( $retry_key, [ 'attempt' => $attempt, 'after' => time() + $delay, 'global_generation' => (int) ( $attempt_snapshot[1] ?? $global ), 'source_snapshot' => $attempt_snapshot ], DAY_IN_SECONDS );
+                } else {
+                    if ( $retry ) delete_transient( $retry_key );
+                    if ( in_array( $key, (array) get_option( self::DIRTY_OPTION, [] ), true ) ) {
+                        // An edit during rendering belongs to another pass.
+                        GML_Resource_Manifest_Store::mark_stale_by_key( $key );
+                    }
+                }
+                array_shift( $batch );
             }
-            $dirty = array_slice( $dirty, count( $batch ) );
-            if ( $dirty ) {
-                update_option( self::DIRTY_OPTION, $dirty, false );
-                wp_schedule_single_event( time() + 30, self::DIRTY_HOOK );
-            } else delete_option( self::DIRTY_OPTION );
+            if ( ! get_option( self::DIRTY_OPTION, [] ) ) delete_option( self::FAILURE_OPTION );
         } finally {
+            foreach ( $batch as $key ) self::add_dirty( $key );
             GML_Atomic_Option_Lock::release( GML_Resource_Backfill::LOCK, $token );
         }
+    }
+
+    /** Admin-only caller decides display; no private content or remote messages. */
+    public static function diagnostics( $key ) {
+        $row = GML_Resource_Manifest_Store::get_by_key( $key );
+        $dirty = (array) get_option( self::DIRTY_OPTION, [] );
+        $state = GML_Resource_Backfill::state();
+        $failure = (array) get_option( self::FAILURE_OPTION, [] );
+        $lock = GML_Atomic_Option_Lock::get( GML_Resource_Backfill::LOCK );
+        $retry = (array) get_transient( 'gml_manifest_retry_' . md5( $key ) );
+        return [
+            'backfill' => array_intersect_key( $state, array_flip( [ 'status', 'phase', 'cursor', 'updated_at', 'reason' ] ) ),
+            'dirty_count' => count( $dirty ), 'resource_pending' => in_array( $key, $dirty, true ),
+            'manifest_state' => $row ? $row->discovery_state : 'missing',
+            'manifest_global_generation' => $row ? (int) $row->global_generation : 0,
+            'current_global_generation' => self::global_generation(),
+            'manifest_updated_at' => $row ? $row->updated_at : '',
+            'manifest_discovered_at' => $row ? $row->discovered_at : '',
+            'lock_active' => (int) $lock['expires'] > time(), 'lock_expires_at' => (int) $lock['expires'],
+            'next_inventory_recovery' => wp_next_scheduled( GML_Resource_Readiness::REBUILD_HOOK, [ 'recovery' ] ),
+            'next_inventory_page' => wp_next_scheduled( GML_Resource_Readiness::REBUILD_HOOK, [ 'inventory' ] ),
+            'resource_retry_after' => (int) ( $retry['after'] ?? 0 ),
+            'next_dirty_run' => wp_next_scheduled( self::DIRTY_HOOK ),
+            'next_backfill_run' => wp_next_scheduled( GML_Resource_Backfill::HOOK ),
+            'last_failure' => ( $failure['resource_key'] ?? '' ) === $key
+                ? array_intersect_key( $failure, array_flip( [ 'error_code', 'phase', 'updated_at' ] ) ) : [],
+        ];
     }
 
     public static function process_reverse() { GML_Resource_Readiness::continue_reverse(); }
@@ -184,6 +399,7 @@ final class GML_Resource_Manifest_Manager {
         if ( ! GML_Resource_Manifest_Store::tables_ready() ) return;
         GML_Resource_Readiness::migrate_legacy_continuation();
         GML_Resource_Readiness::ensure_recovery_schedule();
+        if ( get_option( self::RECOVERY_CURSOR, false ) === false ) self::schedule_inventory();
         if ( get_option( self::DIRTY_OPTION, [] ) && ! wp_next_scheduled( self::DIRTY_HOOK ) ) wp_schedule_single_event( time() + 15, self::DIRTY_HOOK );
         GML_Resource_Backfill::maybe_schedule();
     }
@@ -202,10 +418,13 @@ final class GML_Resource_Manifest_Manager {
     }
 
     private static function stale_post_keys( WP_Post $post ) {
+        global $wpdb;
         $keys = [ 'post:' . sanitize_key( $post->post_type ) . ':' . (int) $post->ID ];
         if ( (int) get_option( 'page_on_front', 0 ) === (int) $post->ID ) $keys[] = 'role:front_page:' . (int) $post->ID;
         if ( (int) get_option( 'page_for_posts', 0 ) === (int) $post->ID ) $keys[] = 'role:posts_page:' . (int) $post->ID;
         foreach ( $keys as $key ) {
+            // A new draft or internal post has no published manifest to retire.
+            if ( ! GML_Resource_Manifest_Store::get_by_key( $key ) && $wpdb->last_error === '' ) continue;
             GML_Resource_Manifest_Store::mark_stale_by_key( $key, 'unpublished:' . (string) $post->post_modified_gmt );
             self::add_dirty( $key );
         }

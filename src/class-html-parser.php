@@ -14,10 +14,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 require_once __DIR__ . '/class-translation-text.php';
+require_once __DIR__ . '/class-breadcrumb-jsonld.php';
 
 class GML_HTML_Parser {
 
-    private $skip_tags = [ 'script', 'style', 'code', 'pre', 'svg', 'noscript', 'iframe', 'textarea' ];
+    private $skip_tags = [ 'script', 'style', 'code', 'pre', 'svg', 'noscript', 'iframe' ];
     private $text_attrs = [ 'alt', 'placeholder', 'aria-label', 'aria-description' ];
     private $seo_meta_names = [
         'title', 'description', 'keywords',
@@ -71,140 +72,13 @@ class GML_HTML_Parser {
             return $html;
         }
 
-        // ── Step 1: protect non-visible blocks and all markup ────────────────
-        //
-        // Strategy: tokenise FIRST, translate SECOND, restore THIRD.
-        // Anything tokenised is invisible to str_replace, even when it contains
-        // the same word as a translated visible text node.
-
-        $url_tokens    = [];
-        $token_counter = 0;
-
-        $tokenise = function( $match ) use ( &$url_tokens, &$token_counter ) {
-            $token = '<!--GMLURL_' . $token_counter . '_' . md5( $match[0] ) . '-->';
-            $url_tokens[ $token ] = $match[0];
-            $token_counter++;
+        $tokens = [];
+        $tokenise = static function( $markup ) use ( &$tokens ) {
+            $token = '<!--GMLURL_' . count( $tokens ) . '_' . md5( $markup ) . '-->';
+            $tokens[ $token ] = $markup;
             return $token;
         };
-
-        // ── Block-level protection (must run first) ──────────────────────────
-
-        // L) HTML comments <!-- ... --> — may contain conditional comments,
-        //    IE hacks, builder markers, or attribute-like syntax that must
-        //    not be matched by subsequent attribute patterns.
-        $html = preg_replace_callback(
-            '/<!--(?!GMLURL_|GML_NOTRANSLATE_).*?-->/s',
-            $tokenise,
-            $html
-        );
-
-        // G) <svg>...</svg> — tokenise entire SVG blocks. SVG elements contain
-        //    technical text (<text>, <title>, <desc>) and attribute values that
-        //    must never be translated. walk() already skips SVG for extraction,
-        //    but str_replace is global and would still hit SVG content if any
-        //    SVG text matches a translatable string elsewhere on the page.
-        $html = preg_replace_callback(
-            '/<svg\b[^>]*>.*?<\/svg>/si',
-            $tokenise,
-            $html
-        );
-
-        // K) <code>...</code> — inline code snippets should not be translated.
-        //    walk() already skips <code> for extraction, but str_replace is global.
-        $html = preg_replace_callback(
-            '/<code\b[^>]*>.*?<\/code>/si',
-            $tokenise,
-            $html
-        );
-
-        // O) <script>...</script> — JavaScript code must never be translated.
-        //    walk() skips <script> for text extraction, but str_replace is global.
-        //    Page builders like Oxygen embed inline JS that references CSS class
-        //    names (e.g. jQuery('.t-auto-close')), and if a class name fragment
-        //    like "close" matches a translatable word, str_replace corrupts the
-        //    JS selector, breaking accordion/toggle/tab functionality.
-        $html = preg_replace_callback(
-            '/<script\b[^>]*>.*?<\/script>/si',
-            $tokenise,
-            $html
-        );
-
-        // P) <style>...</style> — CSS code must never be translated.
-        //    Same reasoning as <script>: CSS selectors, property values, and
-        //    animation names could be corrupted by str_replace.
-        $html = preg_replace_callback(
-            '/<style\b[^>]*>.*?<\/style>/si',
-            $tokenise,
-            $html
-        );
-
-        // Q) <pre>...</pre> — preformatted text / code blocks.
-        //    walk() skips <pre> for text extraction, but str_replace is global.
-        $html = preg_replace_callback(
-            '/<pre\b[^>]*>.*?<\/pre>/si',
-            $tokenise,
-            $html
-        );
-
-        // R) <noscript>...</noscript> — fallback content for non-JS browsers.
-        //    May contain HTML with text that looks translatable but is not
-        //    visible to JS-enabled users. str_replace could corrupt it.
-        $html = preg_replace_callback(
-            '/<noscript\b[^>]*>.*?<\/noscript>/si',
-            $tokenise,
-            $html
-        );
-
-        // S) <textarea>...</textarea> — form textarea default values.
-        //    Content between tags is raw text, not child elements.
-        //    walk() skips <textarea>, but str_replace could hit matching text.
-        $html = preg_replace_callback(
-            '/<textarea\b[^>]*>.*?<\/textarea>/si',
-            $tokenise,
-            $html
-        );
-
-        // T) <iframe>...</iframe> — embedded content frames.
-        //    walk() skips <iframe>, and any fallback text inside should not
-        //    be translated as it may contain technical content or URLs.
-        $html = preg_replace_callback(
-            '/<iframe\b[^>]*>.*?<\/iframe>/si',
-            $tokenise,
-            $html
-        );
-
-        // N) <title>...</title> — protect the entire title tag from global
-        //    str_replace. The title text will be replaced precisely inside
-        //    the tokenised block AFTER the main str_replace pass, preventing
-        //    cross-contamination with description or other overlapping texts.
-        $title_token_map = []; // token => [ 'full' => '<title>...</title>', 'inner' => 'text' ]
-        $html = preg_replace_callback(
-            '/<title\b[^>]*>(.*?)<\/title>/si',
-            function( $m ) use ( &$url_tokens, &$token_counter, &$title_token_map ) {
-                $token = '<!--GMLURL_' . $token_counter . '_' . md5( $m[0] ) . '-->';
-                $url_tokens[ $token ] = $m[0]; // will be overwritten later with translated version
-                $title_token_map[ $token ] = [
-                    'full'  => $m[0],
-                    'inner' => $m[1],
-                ];
-                $token_counter++;
-                return $token;
-            },
-            $html
-        );
-
-        // Translate only explicitly human-readable values inside tags, then
-        // hide every remaining tag from the global visible-text replacement.
-        // This closes the last broad str_replace gap: a visible word such as
-        // "div", "main", or "form" must never rewrite an HTML tag name or an
-        // unlisted technical attribute that happens to contain the same text.
-        $html = $this->translate_allowed_tag_attributes( $html, $replacements );
-        $html = $this->map_html_tags( $html, function( $tag ) use ( $tokenise ) {
-            if ( strpos( $tag, '<!--GMLURL_' ) === 0 || strpos( $tag, '<!--GML_NOTRANSLATE_' ) === 0 ) {
-                return $tag;
-            }
-            return $tokenise( [ $tag ] );
-        } );
+        $html = $this->tokenize_markup( $html, $replacements, $tokenise );
 
         $safe_replacements = [];
         foreach ( $replacements as $original => $translated ) {
@@ -248,71 +122,22 @@ class GML_HTML_Parser {
         // just as walk() does, without serializing or reformatting the DOM.
         // This handles mixed named/numeric entities and prevents replacements
         // from cascading through a previously translated value.
-        $html = preg_replace_callback( '/(^|>)([^<]+)(?=<|$)/s', static function( $match ) use ( $safe_replacements ) {
-            $decoded = html_entity_decode( $match[2], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+        $parts = preg_split( '/(<!--GMLURL_[0-9]+_[a-f0-9]{32}-->)/', $html, -1, PREG_SPLIT_DELIM_CAPTURE );
+        foreach ( $parts as &$part ) {
+            if ( isset( $tokens[$part] ) ) continue;
+            $decoded = html_entity_decode( $part, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
             $key = trim( $decoded );
-            if ( ! array_key_exists( $key, $safe_replacements ) ) return $match[0];
-            $leading = strlen( $match[2] ) - strlen( ltrim( $match[2] ) );
-            $trailing = strlen( $match[2] ) - strlen( rtrim( $match[2] ) );
-            return $match[1] . substr( $match[2], 0, $leading ) . $safe_replacements[ $key ]
-                . ( $trailing ? substr( $match[2], -$trailing ) : '' );
-        }, $html );
+            if ( ! array_key_exists( $key, $safe_replacements ) ) continue;
+            $leading = strlen( $part ) - strlen( ltrim( $part ) );
+            $trailing = strlen( $part ) - strlen( rtrim( $part ) );
+            $part = substr( $part, 0, $leading ) . $safe_replacements[$key]
+                . ( $trailing ? substr( $part, -$trailing ) : '' );
+        }
+        unset( $part );
+        $html = implode( '', $parts );
 
         // ── Step 2b: precise title replacement ────────────────────────────────
-        // The <title> tag was tokenised in step 1 (Category N) to prevent
-        // global str_replace from cross-contaminating it with description
-        // or other overlapping translations. Now we do a targeted replacement
-        // ONLY for the exact title text inside the tokenised block.
-        if ( ! empty( $title_token_map ) ) {
-            foreach ( $title_token_map as $token => $info ) {
-                $title_html  = $info['full'];
-                $title_inner = $info['inner'];
-
-                // Find the translation for this exact title text.
-                // DOMDocument's textContent decodes HTML entities, so the
-                // replacements key is UTF-8 while $title_inner may contain
-                // entities like &#8211; or &ndash;. Try both forms.
-                $decoded_inner = html_entity_decode( $title_inner, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-                $lookup_key    = isset( $replacements[ $title_inner ] ) ? $title_inner : ( isset( $replacements[ $decoded_inner ] ) ? $decoded_inner : null );
-
-                if ( $lookup_key !== null && $replacements[ $lookup_key ] !== $lookup_key ) {
-                    $translated_title = $replacements[ $lookup_key ];
-
-                    // Clean Markdown formatting (same as main loop)
-                    $translated_title = GML_Translation_Text::clean_markdown_wrappers( $translated_title );
-                    $translated_title = html_entity_decode( GML_Translation_Text::plain_text( trim( $translated_title ) ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-
-                    // Safety: strip "Description: ..." suffix that Gemini sometimes
-                    // appends when it merges title and description translations.
-                    // Pattern: "Translated TitleDescription: some description text"
-                    // or "Translated Title - Description: some description text"
-                    $translated_title = preg_replace( '/\s*[-–—]?\s*Description\s*:\s*.+$/si', '', $translated_title );
-                    $translated_title = trim( $translated_title );
-
-                    // Replace the inner text within the <title> tag.
-                    // Use $title_inner (raw HTML form) as the search string.
-                    $title_html = str_replace(
-                        $title_inner,
-                        htmlspecialchars( $translated_title, ENT_QUOTES | ENT_HTML5, 'UTF-8' ),
-                        $title_html
-                    );
-                }
-
-                // Update the token's restoration value with the translated title
-                $url_tokens[ $token ] = $title_html;
-            }
-        }
-
-        // ── Step 3: restore URL tokens ────────────────────────────────────────
-        if ( ! empty( $url_tokens ) ) {
-            $html = str_replace(
-                array_keys( $url_tokens ),
-                array_values( $url_tokens ),
-                $html
-            );
-        }
-
-        return $html;
+        return strtr( $html, $tokens );
     }
 
     /**
@@ -320,53 +145,81 @@ class GML_HTML_Parser {
      * all markup is tokenised. Everything else inside a tag remains byte-for-
      * byte unchanged.
      */
-    private function translate_allowed_tag_attributes( $html, array $replacements ) {
-        return $this->map_html_tags(
-            (string) $html,
-            function( $tag ) use ( $replacements ) {
-                if ( ! preg_match( '/^<[a-zA-Z]/', $tag ) ) {
-                    return $tag;
+    private function tokenize_markup( $html, array $replacements, callable $tokenise ) {
+        $stack = [];
+        $context = [ 'text_excluded' => false, 'tag_excluded' => false ];
+        $void_tags = array_merge( $this->skip_tags, [ 'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr', 'textarea', 'title' ] );
+        $selectors = get_option( 'gml_exclude_selectors', [] );
+        if ( class_exists( 'GML_Exclusion_Rules' ) ) {
+            $selectors = array_merge( $selectors, ( new GML_Exclusion_Rules() )->get_excluded_selectors() );
+        }
+        return $this->map_html_tags( $html, function( $tag ) use ( $replacements, &$stack, $void_tags, $selectors, &$context ) {
+            if ( ! preg_match( '~^<(/?)([a-zA-Z][a-zA-Z0-9:-]*)\b~', $tag, $name ) ) return $tag;
+            $name_text = strtolower( $name[2] );
+            if ( $name[1] === '/' ) {
+                for ( $i = count( $stack ) - 1; $i >= 0; $i-- ) {
+                    if ( $stack[$i][0] === $name_text ) { $stack = array_slice( $stack, 0, $i ); break; }
                 }
-                $tag = preg_replace_callback(
-                    '/(\b(?:alt|placeholder|aria-label|aria-description)\s*=\s*)(["\'])(.*?)\2/si',
-                    function( $attribute ) use ( $replacements ) {
-                        return $attribute[1] . $attribute[2]
-                            . $this->translated_attribute_value( $attribute[3], $replacements )
-                            . $attribute[2];
-                    },
-                    $tag
-                );
-
-                if ( strtolower( substr( $tag, 0, 5 ) ) !== '<meta' ) {
-                    return $tag;
-                }
-                if ( ! preg_match( '/\b(?:name|property)\s*=\s*(["\'])(.*?)\1/i', $tag, $key_match ) ) {
-                    return $tag;
-                }
-                $key = strtolower( html_entity_decode( $key_match[2], ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
-                if ( ! in_array( $key, $this->seo_meta_names, true ) ) {
-                    return $tag;
-                }
-
-                return preg_replace_callback(
-                    '/(\bcontent\s*=\s*)(["\'])(.*?)\2/si',
-                    function( $attribute ) use ( $replacements ) {
-                        return $attribute[1] . $attribute[2]
-                            . $this->translated_attribute_value( $attribute[3], $replacements )
-                            . $attribute[2];
-                    },
-                    $tag,
-                    1
-                );
+                $context['text_excluded'] = $stack && $stack[count($stack) - 1][1];
+                $context['tag_excluded'] = false;
+                return $tag;
             }
-        );
+            // Consume whole attributes so data-value or quoted JSON cannot be
+            // mistaken for a control's actual value/type attribute.
+            $pattern = '~(\s+)([^\s=/>]+)(\s*=\s*)(?:(["\'])(.*?)\4|([^\s>]+))~s';
+            preg_match_all( $pattern, $tag, $matches, PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL );
+            $attributes = [];
+            foreach ( $matches as $attribute ) {
+                $key = strtolower( $attribute[2] );
+                if ( ! array_key_exists( $key, $attributes ) ) {
+                    $attributes[$key] = html_entity_decode( $attribute[4] !== null ? $attribute[5] : $attribute[6], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                }
+            }
+            $classes = preg_split( '/\s+/', $attributes['class'] ?? '' );
+            $excluded = ( $stack && $stack[count($stack) - 1][1] )
+                || strtolower( $attributes['translate'] ?? '' ) === 'no'
+                || in_array( 'notranslate', $classes, true );
+            foreach ( $selectors as $selector ) {
+                $selector = trim( $selector );
+                if ( $selector === '' ) continue;
+                if ( $selector[0] === '.' && in_array( substr( $selector, 1 ), $classes, true ) ) $excluded = true;
+                if ( $selector[0] === '#' && ( $attributes['id'] ?? '' ) === substr( $selector, 1 ) ) $excluded = true;
+            }
+            if ( ! in_array( $name_text, $void_tags, true ) ) $stack[] = [ $name_text, $excluded ];
+            $context['text_excluded'] = $stack && $stack[count($stack) - 1][1];
+            $context['tag_excluded'] = $excluded;
+            if ( $excluded || in_array( $name_text, $this->skip_tags, true ) ) return $tag;
+            $allowed = $this->text_attrs;
+            if ( $name_text === 'meta' ) {
+                $meta_name = strtolower( ( $attributes['name'] ?? '' ) ?: ( $attributes['property'] ?? '' ) );
+                if ( in_array( $meta_name, $this->seo_meta_names, true ) ) $allowed[] = 'content';
+            }
+            if ( $name_text === 'input' && $this->input_has_ui_value( $attributes['type'] ?? '', $attributes['name'] ?? '' ) ) {
+                $allowed[] = 'value';
+            }
+            return preg_replace_callback( $pattern, function( $attribute ) use ( $replacements, $allowed ) {
+                if ( ! in_array( strtolower( $attribute[2] ), $allowed, true ) ) return $attribute[0];
+                $raw = $attribute[4] !== null ? $attribute[5] : $attribute[6];
+                $translated = $this->translated_attribute_value( $raw, $replacements );
+                if ( $translated === $raw ) return $attribute[0];
+                $quote = $attribute[4] !== null ? $attribute[4] : '"';
+                return $attribute[1] . $attribute[2] . $attribute[3] . $quote . $translated . $quote;
+            }, $tag, -1, $count, PREG_UNMATCHED_AS_NULL );
+        }, $tokenise, $replacements, $context );
+    }
+
+    private function input_has_ui_value( $type, $name ) {
+        $type = strtolower( $type );
+        // Named submit values can be successful controls used for routing.
+        return in_array( $type, [ 'button', 'reset' ], true )
+            || ( $type === 'submit' && $name === '' );
     }
 
     /**
      * Transform complete HTML tags while respecting quoted > characters used
      * by page-builder JSON and inline configuration attributes.
      */
-    private function map_html_tags( $html, callable $callback ) {
+    private function map_html_tags( $html, callable $callback, callable $tokenise, array $replacements, array &$context ) {
         $html   = (string) $html;
         $length = strlen( $html );
         $offset = 0;
@@ -375,17 +228,36 @@ class GML_HTML_Parser {
         while ( $offset < $length ) {
             $start = strpos( $html, '<', $offset );
             if ( $start === false ) {
-                $result .= substr( $html, $offset );
+                $text = substr( $html, $offset );
+                $result .= $context['text_excluded'] && $text !== '' ? $tokenise( $text ) : $text;
                 break;
             }
-            $result .= substr( $html, $offset, $start - $offset );
+            $text = substr( $html, $offset, $start - $offset );
+            $result .= $context['text_excluded'] && $text !== '' ? $tokenise( $text ) : $text;
+
+            if ( substr( $html, $start, 4 ) === '<!--' ) {
+                $close = strpos( $html, '-->', $start + 4 );
+                if ( $close === false ) { $result .= $tokenise( substr( $html, $start ) ); break; }
+                $offset = $close + 3;
+                $result .= $tokenise( substr( $html, $start, $offset - $start ) );
+                continue;
+            }
+
+            // A comparison sign before a number or whitespace is visible text,
+            // not an HTML tag. Keep it in the same replacement segment.
+            if ( ! preg_match( '~^<(?:/?[a-zA-Z]|!|\\?)~', substr( $html, $start, 3 ) ) ) {
+                $result .= $context['text_excluded'] ? $tokenise('<') : '<';
+                $offset = $start + 1;
+                continue;
+            }
 
             $quote = '';
             $end   = $start + 1;
             for ( ; $end < $length; $end++ ) {
                 $char = $html[ $end ];
                 if ( $quote !== '' ) {
-                    if ( $char === $quote && ( $end === 0 || $html[ $end - 1 ] !== '\\' ) ) {
+                    // HTML attributes do not use backslash quote escaping.
+                    if ( $char === $quote ) {
                         $quote = '';
                     }
                     continue;
@@ -400,23 +272,91 @@ class GML_HTML_Parser {
             }
 
             if ( $end >= $length ) {
-                $result .= substr( $html, $start );
+                $result .= $tokenise( substr( $html, $start ) );
                 break;
             }
 
             $tag = substr( $html, $start, $end - $start + 1 );
-            $result .= call_user_func( $callback, $tag );
+            $mapped_tag = call_user_func( $callback, $tag );
             $offset = $end + 1;
+            if ( preg_match( '~^<(textarea|script|style|code|pre|svg|noscript|iframe|title)(?=[\s/>])~i', $tag, $raw ) ) {
+                $name = strtolower( $raw[1] );
+                if ( $name === 'svg' && preg_match( '~/\s*>$~', $tag ) ) {
+                    $result .= $tokenise( $tag );
+                    continue;
+                }
+                if ( in_array( $name, [ 'svg', 'code', 'pre' ], true ) ) {
+                    $raw_end = self::protected_element_end( $html, $offset, $name );
+                    $result .= $tokenise( $tag . substr( $html, $offset, $raw_end - $offset ) );
+                    $offset = $raw_end;
+                    continue;
+                }
+                $raw_end = $length;
+                if ( preg_match( '~</' . $name . '\s*>~i', $html, $close, PREG_OFFSET_CAPTURE, $offset ) ) {
+                    $close_start = $close[0][1];
+                    $raw_end = $close_start + strlen( $close[0][0] );
+                    $contents = substr( $html, $offset, $close_start - $offset );
+                    if ( $name === 'title' && ! $context['tag_excluded'] ) {
+                        $contents = $this->translated_attribute_value( $contents, $replacements, true );
+                        $mapped_tag = $tag;
+                    }
+                    if ( $name === 'script' && ! $context['tag_excluded'] && GML_Breadcrumb_JSONLD::is_script_tag( $tag ) ) {
+                        $contents = GML_Breadcrumb_JSONLD::map( $contents, static function( $name ) use ( $replacements ) {
+                            $key = GML_Breadcrumb_JSONLD::text( $name );
+                            if ( ! isset($replacements[$key]) || trim((string)$replacements[$key]) === '' ) return $name;
+                            return GML_Breadcrumb_JSONLD::text( GML_Translation_Text::clean_markdown_wrappers( (string)$replacements[$key] ) );
+                        } );
+                    }
+                    $block = $mapped_tag . $contents . $close[0][0];
+                } else {
+                    $block = $mapped_tag . substr( $html, $offset );
+                }
+                $result .= $tokenise( $block );
+                $offset = $raw_end;
+                continue;
+            }
+            $result .= $tokenise( $mapped_tag );
         }
 
         return $result;
     }
 
-    private function translated_attribute_value( $raw, array $replacements ) {
+    /** HTML permits a literal less-than sign when it does not start markup. */
+    public static function is_markup_start( $html, $offset ) {
+        return (bool) preg_match( '~^<(?:/?[a-zA-Z]|!|\\?)~', substr( $html, $offset, 3 ) );
+    }
+
+    /** Retain the public SVG boundary helper for existing callers. */
+    public static function svg_end( $html, $offset ) {
+        return self::protected_element_end( $html, $offset, 'svg' );
+    }
+
+    /** Protected elements can nest; quoted attributes and raw text are not tags. */
+    public static function protected_element_end( $html, $offset, $element ) {
+        $pattern = '~<!--(?:.*?-->|.*\z)|<!\[CDATA\[(?:.*?\]\]>|.*\z)|<(/?)([a-z][a-z0-9:-]*)(?=[\s/>])(?:[^<>"\']++|"[^"]*"|\'[^\']*\')*>~is';
+        $depth = 1;
+        while ( preg_match( $pattern, $html, $match, PREG_OFFSET_CAPTURE, $offset ) ) {
+            $offset = $match[0][1] + strlen( $match[0][0] );
+            $name = strtolower( $match[2][0] ?? '' );
+            if ( $name === $element ) {
+                if ( $match[1][0] === '/' ) {
+                    if ( --$depth === 0 ) return $offset;
+                } elseif ( $element !== 'svg' || ! preg_match( '~/\s*>$~', $match[0][0] ) ) {
+                    $depth++;
+                }
+            } elseif ( in_array( $name, [ 'script', 'style', 'textarea', 'title', 'iframe', 'noscript' ], true ) && $match[1][0] !== '/' ) {
+                if ( ! preg_match( '~</' . $name . '\s*>~i', $html, $end, PREG_OFFSET_CAPTURE, $offset ) ) return strlen( $html );
+                $offset = $end[0][1] + strlen( $end[0][0] );
+            }
+        }
+        return strlen( $html );
+    }
+
+    private function translated_attribute_value( $raw, array $replacements, $title = false ) {
         $decoded = html_entity_decode( (string) $raw, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
         $key = array_key_exists( $raw, $replacements )
             ? $raw
-            : ( array_key_exists( $decoded, $replacements ) ? $decoded : null );
+            : ( array_key_exists( trim( $decoded ), $replacements ) ? trim( $decoded ) : null );
         if ( $key === null || trim( (string) $replacements[ $key ] ) === '' ) {
             return $raw;
         }
@@ -424,7 +364,13 @@ class GML_HTML_Parser {
         $translated = GML_Translation_Text::plain_text( (string) $replacements[ $key ] );
         $translated = GML_Translation_Text::clean_markdown_wrappers( $translated );
         $translated = html_entity_decode( trim( $translated ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-        return htmlspecialchars( $translated, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+        if ( $title ) {
+            if ( $replacements[ $key ] === $key ) return $raw;
+            $translated = trim( preg_replace( '/\s*[-–—]?\s*Description\s*:\s*.+$/si', '', $translated ) );
+        }
+        $leading = substr( $decoded, 0, strlen( $decoded ) - strlen( ltrim( $decoded ) ) );
+        $trailing = substr( $decoded, strlen( rtrim( $decoded ) ) );
+        return htmlspecialchars( $leading . $translated . $trailing, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
     }
 
     public function verify_brand_protection( $original, $translated ) {
@@ -444,13 +390,24 @@ class GML_HTML_Parser {
     private function walk( DOMNode $node, array &$nodes ) {
         if ( $node->nodeType === XML_ELEMENT_NODE ) {
             $tag = strtolower( $node->nodeName );
+            if ( $tag === 'script' && ! $this->is_excluded( $node )
+                && GML_Breadcrumb_JSONLD::is_script_tag( '<script type="' . htmlspecialchars($node->getAttribute('type'), ENT_QUOTES, 'UTF-8') . '">' ) ) {
+                foreach ( GML_Breadcrumb_JSONLD::texts( $node->textContent ) as $text ) {
+                    if ( ! $this->skip_text($text) ) $nodes[] = ['type'=>'schema_text','text'=>$text,'hash'=>md5($text),'context_type'=>'text'];
+                }
+                return;
+            }
             if ( in_array( $tag, $this->skip_tags, true ) ) return;
             if ( $this->is_excluded( $node ) ) return;
             if ( $tag === 'meta' ) { $this->extract_meta( $node, $nodes ); return; }
             // Translate <title> as SEO meta (affects browser tab + search snippet)
             if ( $tag === 'title' ) { $this->extract_title( $node, $nodes ); return; }
 
-            foreach ( $this->text_attrs as $attr ) {
+            $attrs = $this->text_attrs;
+            if ( $tag === 'input' && $this->input_has_ui_value( $node->getAttribute( 'type' ), $node->getAttribute( 'name' ) ) ) {
+                $attrs[] = 'value';
+            }
+            foreach ( $attrs as $attr ) {
                 if ( $node->hasAttribute( $attr ) ) {
                     $val = trim( $node->getAttribute( $attr ) );
                     if ( $val !== '' && ! $this->skip_text( $val ) ) {
@@ -458,6 +415,7 @@ class GML_HTML_Parser {
                     }
                 }
             }
+            if ( $tag === 'textarea' ) return;
         }
 
         if ( $node->nodeType === XML_TEXT_NODE ) {
@@ -502,7 +460,7 @@ class GML_HTML_Parser {
     }
 
     private function is_excluded( DOMNode $node ) {
-        if ( $node->hasAttribute( 'translate' ) && $node->getAttribute( 'translate' ) === 'no' ) return true;
+        if ( $node->hasAttribute( 'translate' ) && strtolower( $node->getAttribute( 'translate' ) ) === 'no' ) return true;
         if ( $node->hasAttribute( 'class' ) ) {
             if ( in_array( 'notranslate', preg_split( '/\s+/', $node->getAttribute( 'class' ) ), true ) ) return true;
         }

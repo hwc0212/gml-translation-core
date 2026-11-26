@@ -31,8 +31,8 @@ if ( $mode === 'prepare' ) {
     $manifest = GML_Resource_Manifest_Store::get_by_key( $resource->get_key() );
     $wpdb->delete( GML_Resource_Approval::review_table(), [ 'resource_id' => (int) $manifest->id, 'target_lang' => 'qa' ] );
     $wpdb->delete( GML_Resource_Approval::audit_table(), [ 'resource_id' => (int) $manifest->id, 'target_lang' => 'qa' ] );
-    delete_option( $result_prefix . 'one' );
-    delete_option( $result_prefix . 'two' );
+    update_option( $result_prefix . 'one', 'pending', false );
+    update_option( $result_prefix . 'two', 'pending', false );
     update_option( $snapshot_option, GML_Resource_Approval::expected_snapshot( GML_Resource_Approval::get_status( $resource, 'qa' ) ), false );
     echo "OK Phase 2C.1 concurrent review prepared for {$case}\n";
     exit( 0 );
@@ -49,7 +49,11 @@ if ( $mode === 'worker' ) {
     $result = $decision === 'approve'
         ? GML_Resource_Approval::approve( $resource, 'qa', 11, 'Concurrent approval.', $snapshot )
         : GML_Resource_Approval::reject( $resource, 'qa', 12, 'Concurrent rejection.', $snapshot );
-    update_option( $result_prefix . $slot, is_wp_error( $result ) ? $result->get_error_code() : 'success', false );
+    $outcome = is_wp_error( $result ) ? $result->get_error_code() : 'success';
+    $saved = update_option( $result_prefix . $slot, $outcome, false );
+    if ( ! $saved && get_option( $result_prefix . $slot ) !== $outcome ) {
+        throw new RuntimeException( 'Concurrent fixture outcome could not be saved.' );
+    }
     echo "OK Phase 2C.1 concurrent worker {$slot}/{$decision} completed for {$case}\n";
     exit( 0 );
 }

@@ -1,5 +1,80 @@
 # GML Translation Core
 
+## 0.9.25 Explicit single-resource inventory refresh (2026-11-26)
+
+- Add snapshot-bound inventory refresh using the existing renderer, manifest transaction and configured-language readiness calculations. Empty-target discovery still never calls the translation discover branch.
+- Explicit refresh reports partial readiness failure without adding new dirty recovery hints; normal background discovery retains its existing recovery behavior.
+- Detect observed cache-epoch changes during rendering/parsing and retain existing source/global/manifest version guards. This is not an atomic dependency graph for embedded products.
+- Sign inventory-only source requests using the existing crawl secret. The consuming product must avoid scheduler repair in this request context and still enforce administrator capability, nonce and snapshot checks.
+- Keep internal cache invalidation and resource URL outbox consistency. Cache generation can affect all GML HTML keys; registered adapters may later purge current/historical URLs. No zero-cache-side-effect or atomic multi-language rollback claim.
+- No schema migration, TM mutation, AI enqueue, queue priority or publication-policy change. See [isolated acceptance and limitations](docs/inventory-refresh-0.9.25.md).
+
+## 0.9.24 Pre-merge data boundaries (2026-11-25)
+
+- Respect explicit null and nested JSON-LD contexts. Skip aliases, term overrides and opaque vocabularies whose schema meaning cannot be established locally.
+- Share balanced code/pre/SVG boundaries between text replacement and URL rewriting, including nested and unterminated protected blocks.
+- Keep existing readiness locks, snapshots, retries, TM records and publication thresholds unchanged. Consumer regressions cover the new boundaries.
+
+## 0.9.23 Comparison text and breadcrumb labels (2026-11-25)
+
+- Keep literal comparison signs in whole-node text reconstruction; reuse markup-start recognition in exclusion and navigation scans.
+- Discover only human-readable BreadcrumbList item labels from valid schema.org JSON-LD and reuse existing scoped translation lookup, manual records and missing-string gates.
+- Patch only allowlisted JSON string spans, preserving every other byte, graph identity, numbers, other schema nodes and ordinary scripts. Malformed, duplicate-key and oversized payloads are untouched.
+- Localize breadcrumb item page URLs through existing public-navigation rules, preserving installation boundaries, pagination, fragments, media and service exclusions. No competing schema or SEO ownership change.
+- No schema/TM migration, forced index, new queue, AI transport, scheduler or data rewrite. Source and translated page discovery may include previously unseen breadcrumb labels.
+
+## 0.9.22 Excluded text reconstruction (2026-11-23)
+
+- Preserve visible text and title contents inside existing notranslate, translate=no and configured simple-selector exclusions, including when the same source text is translated outside the excluded region.
+- Reuse the existing markup scanner and ancestor stack. Preserve exact excluded bytes, raw textarea/code/SVG protection and allowed attribute handling.
+- Match the HTML translate=no value case-insensitively. No Translation Memory, queue, readiness or schema migration.
+- Share balanced SVG boundaries with the output buffer and apply HTML quote rules after literal backslashes, preserving technical anchors while localizing following public navigation.
+- Consumer regressions cover exact parser output and the real WordPress/TM/output-buffer path.
+
+## 0.9.21 Readiness measurement visibility (2026-11-23)
+
+- Expose the existing unknown source-length count as a nullable read-only policy result so hosts can distinguish incomplete measurement from 100% of recorded bytes.
+- Keep all index-readiness conditions, thresholds, source/translation version checks, scheduling and recovery behavior unchanged.
+- Cover measured, unmeasured and unknown-length policy results without changing publication decisions.
+
+## 0.9.20 Translation snapshot consistency (2026-11-19)
+
+- Calculate TM fingerprints and readiness counts inside the per-language transaction after locking its current manifest and readiness row.
+- Preserve real TM deletion, operator hold, missing-only insert and human-edit outcomes while readiness work is running.
+- Carry each discovery attempt's starting or committed tuple through its write path so a post-error read cannot bind an old cooldown to a newer source.
+- Retain exponential backoff for unchanged failures, including state-write rollbacks.
+- Drive TM invalidation from materialized hash-related resources and lock M -> R -> S, avoiding language-wide secondary-index lock inversions.
+- Add deterministic interleavings and real two-process deletion races for existing/missing readiness rows under REPEATABLE READ and READ COMMITTED.
+
+## 0.9.19 Readiness and retry callback fencing (2026-11-19)
+
+- Fence each language readiness write against its manifest snapshot under a row lock.
+- Bind readiness-failure invalidation to the committed source snapshot and propagate superseded-work errors.
+- Bind retry cooldowns to source snapshots so a late failed worker cannot restore an obsolete delay after an edit.
+
+## 0.9.18 Review corrections (2026-11-19)
+
+- Preserve newer completed manifests when superseded source/global renders return.
+- Reset inventory cooldowns after source edits and global generation changes, retaining delays for unchanged failures.
+- Classify encoded installation and content paths consistently with the frontend adapter.
+
+## 0.9.17 Navigation URL safety (review candidate, 2026-11-19)
+
+- Preserve WordPress service endpoints, configured content/upload locations, static file links and explicit downloads during HTML navigation rewriting.
+- Respect installation and origin boundaries and existing language prefixes, and preserve URL query strings and fragments through HTML attribute decoding.
+- Export file/path exclusions to the product frontend adapter.
+
+## 0.9.14 Form UI and inventory recovery (local candidate, 2026-11-17)
+
+- Apply HTML quote rules even after literal backslashes, preserving textarea raw contents.
+- Discover and rebuild textarea UI attributes and input button/reset captions; only unnamed submit captions are translatable. Preserve textarea contents, hidden/user values and named-submit business values.
+- Claim dirty hints atomically before rendering; preserve new edits and failed work. Recover orphaned stale/unknown/render-error manifests from the database using the existing maintenance event. No provider work is started.
+- A manifest is acknowledged only after all configured readiness rows are saved. Partial writes keep it private and retryable without changing TM.
+- Persist a backfill wakeup before rendering. Retry failed resources and fence checkpoints against newer pauses/resets.
+- Expose bounded inventory diagnostics and concrete readiness mismatch codes without source text, translation text, lock tokens or remote error messages.
+- No schema, URL, readiness-threshold or translation-data migration. Only GML Translate consumes this candidate; GML SEO remains pinned to its existing Core.
+- Added real database inventory-recovery coverage and optional native CF7 rendering test; see tests/database/form-ui-cf7.php. It requires a separately verified CF7 installation and never submits a form or sends mail.
+
 ## 0.9.13 Snapshot-safe translation deletion
 
 - Add an optional full-row snapshot token to `GML_Translation_Memory::delete_by_id()` and recheck it under the existing translation mutation transaction before deleting.

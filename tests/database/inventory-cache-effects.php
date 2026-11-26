@@ -1,0 +1,28 @@
+<?php
+require __DIR__.'/bootstrap.php';
+gml_test_product_init();wp_set_current_user(1);
+gml_db_assert(GML_Installer::activate()===true,'cache-effects schema available');
+update_option('home','http://gml-cache.test');update_option('siteurl','http://gml-cache.test');
+update_option('permalink_structure','/%postname%/');$wp_rewrite->init();
+update_option('gml_source_lang','en');update_option('gml_languages',[['code'=>'de','enabled'=>true],['code'=>'fr','enabled'=>true]]);
+update_option('gml_multilingual_enabled',true);update_option('blog_public',1);
+$id=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_title'=>'Synthetic cache history','post_name'=>'cache-history-old']);
+$r=GML_Resource_Identity::for_post($id);$old=GML_Page_Cache::cluster_urls($r);
+gml_db_assert(GML_Resource_Manifest_Store::save_complete($r,[['text'=>'Synthetic cache source','context_type'=>'text']])===true,'first manifest records old URLs');
+$m=GML_Resource_Manifest_Store::get_by_key($r->get_key());
+wp_update_post(['ID'=>$id,'post_name'=>'cache-history-new']);$r=GML_Resource_Identity::for_post($id);$current=GML_Page_Cache::cluster_urls($r);
+gml_db_assert(GML_Resource_Manifest_Store::save_complete($r,[['text'=>'Synthetic cache source','context_type'=>'text']])===true,'replacement manifest records current URLs');
+$wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE %s AND option_name<>%s",$wpdb->esc_like(GML_Page_Cache::CLUSTER_PREFIX).'%',GML_Page_Cache::CLUSTER_PREFIX.$m->id));
+$plans=GML_Page_Cache::pending_clusters();$expected=array_values(array_unique(array_merge($old,$current)));
+gml_db_assert(count($plans)===1 && $plans[0]['urls']===$expected && count($expected)===6,'cache outbox retains exact old and new source/target URLs');
+add_filter('wp_doing_cron','__return_true');
+GML_Resource_Cache_Worker::run();
+gml_db_assert(get_option('gml_resource_cache_worker_status')['state']==='adapter_required' && count(GML_Page_Cache::pending_clusters())===1,'no registered adapter leaves outbox pending rather than claiming a purge');
+$fail=true;$calls=[];$adapter=static function($url)use(&$fail,&$calls){$calls[]=$url;if($fail)throw new RuntimeException('Synthetic adapter failure');return true;};
+$filter=static function()use($adapter){return ['isolated'=>$adapter];};add_filter('gml_resource_cluster_cache_adapters',$filter);
+GML_Resource_Cache_Worker::run();
+gml_db_assert(count($calls)===1 && count(GML_Page_Cache::pending_clusters())===1 && get_option('gml_resource_cache_worker_status')['state']==='retry_pending','adapter exception retains token and schedules existing cache continuation');
+$fail=false;$calls=[];GML_Resource_Cache_Worker::run();
+gml_db_assert($calls===$expected && GML_Page_Cache::pending_clusters()===[],'successful adapter receives exact historical/current URLs before acknowledgement');
+gml_db_assert($GLOBALS['gml_test_http_calls']===0,'mock adapter sends no cache or model network request');
+echo "OK inventory cache effects\n";

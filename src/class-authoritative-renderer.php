@@ -6,7 +6,7 @@ final class GML_Authoritative_Renderer {
     const MAX_BYTES = 524288;
     const MAX_REDIRECTS = 3;
 
-    public function render( GML_Resource_Identity $resource ) {
+    public function render( GML_Resource_Identity $resource, $inventory_only = false ) {
         if ( ! $resource->is_eligible() ) return new WP_Error( 'gml_resource_excluded', 'Resource is excluded from authoritative discovery.' );
         $url = $resource->get_source_url();
         if ( ! class_exists( 'GML_URL_Helper' ) || GML_URL_Helper::internal_absolute_path( $url ) === null ) {
@@ -19,7 +19,7 @@ final class GML_Authoritative_Renderer {
             $url = $this->local_url( $url, $source );
             if ( $url === '' || isset( $visited[$url] ) ) return new WP_Error( 'gml_resource_redirect', 'Unsafe or cyclic resource redirect.' );
             $visited[$url] = true;
-            $response = $this->request( $url );
+            $response = $this->request( $url, $inventory_only );
             if ( is_wp_error( $response ) ) return $response;
             $code = (int) wp_remote_retrieve_response_code( $response );
             if ( in_array( $code, [301,308], true ) ) {
@@ -54,11 +54,13 @@ final class GML_Authoritative_Renderer {
         return remove_query_arg('gml_crawl', $url);
     }
 
-    private function request( $url ) {
+    private function request( $url, $inventory_only = false ) {
         $url = add_query_arg( 'gml_crawl', '1', $url );
         $token = class_exists( 'GML_Translation_Content_Crawler' )
             ? GML_Translation_Content_Crawler::request_token()
             : hash_hmac( 'sha256', home_url( '/' ), wp_salt( 'nonce' ) );
+        $headers = [ 'Accept' => 'text/html,application/xhtml+xml', 'X-GML-Crawl' => $token ];
+        if ( $inventory_only ) $headers['X-GML-Inventory-Only'] = '1';
         return wp_safe_remote_get( $url, [
             'timeout'             => 15,
             'redirection'         => 0,
@@ -67,10 +69,7 @@ final class GML_Authoritative_Renderer {
             'limit_response_size' => self::MAX_BYTES,
             'cookies'             => [],
             'user-agent'          => 'GML-Resource-Manifest/' . ( defined( 'GML_TRANSLATION_CORE_VERSION' ) ? GML_TRANSLATION_CORE_VERSION : 'shadow' ),
-            'headers'             => [
-                'Accept'      => 'text/html,application/xhtml+xml',
-                'X-GML-Crawl' => $token,
-            ],
+            'headers'             => $headers,
         ] );
     }
 
